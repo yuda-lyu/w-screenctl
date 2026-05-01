@@ -1,0 +1,56 @@
+# ──────────────────────────────────────────────────────────────
+# Linux systemd unit：開機自動啟動 screenctl API server
+#
+# ── 安裝前要客製的欄位 ────────────────────────────────────
+#   User              改成執行此服務的 Linux 使用者（用 `whoami` 查）
+#   WorkingDirectory  改成專案根目錄絕對路徑（含 g.mjs）
+#   ExecStart         確認 node 路徑（用 `which node` 查）
+#   Environment=DISPLAY=...   只在有 X server / VNC 時保留；headless 環境刪除
+#   After / Requires=vnc.service   沒有 VNC service 時刪除這兩行
+#
+# ── 安裝（需 root）─────────────────────────────────────────
+#   sudo cp service/screenctl-linux.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now screenctl-linux
+#
+# ── 操作 ──────────────────────────────────────────────────
+#   sudo systemctl status   screenctl-linux
+#   sudo systemctl restart  screenctl-linux
+#   sudo systemctl stop     screenctl-linux
+#   sudo systemctl disable  screenctl-linux       # 取消開機自啟
+#   journalctl -u screenctl-linux -f              # 跟 log
+#
+# ── 移除 ──────────────────────────────────────────────────
+#   sudo systemctl disable --now screenctl-linux
+#   sudo rm /etc/systemd/system/screenctl-linux.service
+#   sudo systemctl daemon-reload
+# ──────────────────────────────────────────────────────────────
+
+[Unit]
+Description=Screenctl API server
+# 沒有 VNC service 時刪除下面兩行
+After=vnc.service
+Requires=vnc.service
+
+[Service]
+Type=simple
+
+# 改成你的 Linux 使用者
+User=YOUR_USERNAME
+
+# 改成專案根目錄絕對路徑
+WorkingDirectory=/opt/screenctl
+
+# headless 環境刪除 DISPLAY；有 X server / VNC 才保留
+Environment=DISPLAY=:99
+Environment=PORT=7000
+
+# Node.js 執行檔路徑（用 `which node` 查；常見 /usr/bin/node 或 /usr/local/bin/node）
+ExecStart=/usr/bin/node g.mjs
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

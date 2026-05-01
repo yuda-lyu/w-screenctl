@@ -1,0 +1,7 @@
+/*!
+ * route-factory v1.0.0
+ * (c) 2018-2021 yuda-lyu(semisphere)
+ * Released under the MIT License.
+ */
+!function(e,r){"object"==typeof exports&&"undefined"!=typeof module?r(exports):"function"==typeof define&&define.amd?define(["exports"],r):r((e="undefined"!=typeof globalThis?globalThis:e||self)["route-factory"]={})}(this,function(e){"use strict";const r=[{match:/chrome (closed|dead)|Target.*(closed|crashed)|browser has been disconnected|Execution context was destroyed/i,retry:"after_recovery",code:"CHROME_NOT_OPEN"},{match:/timeout|timed?\s?out/i,retry:"after_1s",code:"TIMEOUT"}];function t(e){const t=e&&e.message?e.message:String(e),{retry:o,code:n}=function(e){const t=e&&e.message?e.message:String(e);if(e&&e.chromeState)return{retry:"after_recovery",code:"CHROME_NOT_OPEN"};for(const e of r)if(e.match.test(t))return{retry:e.retry,code:e.code};return{retry:"never",code:"UNKNOWN"}}(e);return{ok:!1,error:t,code:n,retry:o}}e.chromeRoute=function(e,r,o){return async(n,c)=>{try{return await r.withPage(e=>o(e,n.payload||{},c))}catch(o){return o.chromeState||r.isOpen()||(o.chromeState="closed"),console.error(`[${e}] failed:`,o.message),t(o)}}},e.errResponse=t,e.lifecycleRoute=function(e,r){return async(o,n)=>{try{return await r(o.payload||{},n)}catch(r){return console.error(`[${e}] failed:`,r.message),t(r)}}},e.systemRoute=function(e,r){return async(o,n)=>{try{return await r(o.payload||{},n)}catch(r){return console.error(`[${e}] failed:`,r.message),t(r)}}}});
+//# sourceMappingURL=route-factory.umd.js.map

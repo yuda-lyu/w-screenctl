@@ -1,0 +1,39 @@
+{
+  "name": "w-screenctl",
+  "version": "1.0.0",
+  "main": "dist/w-screenctl.umd.js",
+  "dependencies": {
+    "@hapi/hapi": "^21.4.8",
+    "joi": "^18.1.2",
+    "lodash-es": "^4.18.1",
+    "playwright": "^1.59.1",
+    "w-mousekey": "^1.0.16",
+    "wsemi": "^1.8.49"
+  },
+  "devDependencies": {
+    "w-package-tools": "^1.1.5"
+  },
+  "scripts": {
+    "test": "mocha --parallel --timeout 60000",
+    "deploy": "gh-pages -d docs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuda-lyu/w-screenctl.git"
+  },
+  "keywords": [
+    "package",
+    "tool",
+    "node-os-utils",
+    "node-disk-info",
+    "cpu",
+    "memory",
+    "heap",
+    "disk",
+    "os",
+    "network",
+    "node"
+  ],
+  "author": "yuda-lyu(semisphere)",
+  "license": "MIT"
+}

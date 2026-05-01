@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Windows 工作排程設定檔：開機自動啟動 screenctl API server。
+
+  ── 為什麼用工作排程而不是 Windows Service ────────────────────
+    本 server 的系統級 mouse/keyboard（透過 w-mousekey / AHK）必須跑在
+    互動式 desktop session。Windows Service 預設跑在 session 0，
+    沒有 desktop，AHK 送鍵會無效。工作排程可指定「使用者登入時」觸發，
+    自然有 desktop。
+
+  ── 安裝前要客製的欄位 ─────────────────────────────────────
+    1. <Command>      Node.js 執行檔絕對路徑（預設 C:\Program Files\nodejs\node.exe）
+    2. <WorkingDirectory>  專案根目錄（含 g.mjs）
+    3. <Arguments>    保留 g.mjs 即可（已是預設啟動腳本）
+    4. PORT / CHROME_USER_DATA 想覆寫的話，改 <Arguments> 為 cmd 包裝
+       例：/c set PORT=8000 && node g.mjs
+       並把 <Command> 改成 cmd.exe
+
+  ── 安裝（管理員 cmd） ──────────────────────────────────────
+    schtasks /create /tn "screenctl-api" /xml service\screenctl-win.xml
+
+  ── 啟動 / 停止 ────────────────────────────────────────────
+    schtasks /run    /tn "screenctl-api"     啟動
+    schtasks /end    /tn "screenctl-api"     停止
+    schtasks /query  /tn "screenctl-api"     看狀態
+    schtasks /delete /tn "screenctl-api" /f  移除
+
+  ── 觸發行為 ───────────────────────────────────────────────
+    LogonTrigger：任一使用者登入即啟動。
+    若要綁定特定使用者：在 <LogonTrigger> 內加 <UserId>DESKTOP-XXX\username</UserId>
+    若要改成開機觸發（無人登入）：<LogonTrigger> 換成 <BootTrigger>，但失去 desktop。
+
+  ── 失敗自動重啟 ───────────────────────────────────────────
+    程序異常結束時，每 1 分鐘重試一次，最多 999 次。
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Screenctl API server (auto-start on user logon)</Description>
+    <URI>\screenctl-api</URI>
+  </RegistrationInfo>
+
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT5S</Delay>
+    </LogonTrigger>
+  </Triggers>
+
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Program Files\nodejs\node.exe</Command>
+      <Arguments>g.mjs</Arguments>
+      <WorkingDirectory>C:\screenctl</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
