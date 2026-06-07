@@ -137,12 +137,15 @@ class ChromeManager {
     }
 
     async _launch(opts) {
-        const { url, window, userDataDir, opt = {} } = opts
+        const { url, window, viewport, userDataDir, opt = {} } = opts
         if (!userDataDir) throw new Error('userDataDir required')
 
         const disableGpu = opt.disableGpu === true
         const disableSandbox = opt.disableSandbox === true
-        const hasWindow = window && window.width && window.height
+        const hasPos = window && Number.isFinite(window.x) && Number.isFinite(window.y)
+        const hasSize = window && Number.isFinite(window.width) && Number.isFinite(window.height)
+        const hasViewport = viewport && viewport.width && viewport.height
+        const deviceScaleFactor = opt.deviceScaleFactor
 
         const args = [
             '--disable-dev-shm-usage',
@@ -152,21 +155,18 @@ class ChromeManager {
             '--disable-notifications',
             '--disable-features=Translate',
             '--lang=zh-TW',
-            '--force-device-scale-factor=1',
         ]
         if (disableSandbox) args.push('--no-sandbox')
         if (disableGpu) args.push('--disable-gpu')
+        if (Number.isFinite(deviceScaleFactor)) args.push(`--force-device-scale-factor=${deviceScaleFactor}`)
 
-        let viewport = null
-        if (hasWindow) {
-            const x = window.x || 0
-            const y = window.y || 0
-            args.push(`--window-position=${x},${y}`)
-            args.push(`--window-size=${window.width},${window.height}`)
-            viewport = { width: window.width, height: window.height }
-        }
-        else {
-            args.push('--start-maximized')
+        if (hasPos) args.push(`--window-position=${window.x},${window.y}`)
+        if (hasSize) args.push(`--window-size=${window.width},${window.height}`)
+        if (!hasPos && !hasSize) args.push('--start-maximized')
+
+        let _viewport = null
+        if (hasViewport) {
+            _viewport = { width: viewport.width, height: viewport.height }
         }
 
         mkdirSync(userDataDir, { recursive: true })
@@ -176,10 +176,10 @@ class ChromeManager {
             headless: false,
             ignoreDefaultArgs: ['--enable-automation'],
             args,
-            viewport,
+            viewport: _viewport,
             locale: 'zh-TW',
         }
-        if (viewport) ctxOpts.deviceScaleFactor = 1
+        if (hasViewport && Number.isFinite(deviceScaleFactor)) ctxOpts.deviceScaleFactor = deviceScaleFactor
 
         // launch 不能 cancel；race 輸了要等底層真結束才釋放 _opLock，避免 retry 撞 SingletonLock
         const launchP = chromium.launchPersistentContext(userDataDir, ctxOpts)
@@ -196,7 +196,7 @@ class ChromeManager {
                 )
                 await Promise.race([
                     cleanup,
-                    new Promise((r) => setTimeout(r, TIMEOUT_CLEANUP_GRACE)),
+                    new Promise((resolve) => setTimeout(resolve, TIMEOUT_CLEANUP_GRACE)),
                 ])
             }
             throw err
@@ -256,7 +256,7 @@ class ChromeManager {
             // race 輸了等底層真關完（或 30s grace），避免 _opLock 釋放後撞 SingletonLock
             await Promise.race([
                 closeP.catch(() => {}),
-                new Promise((r) => setTimeout(r, TIMEOUT_CLEANUP_GRACE)),
+                new Promise((resolve) => setTimeout(resolve, TIMEOUT_CLEANUP_GRACE)),
             ])
         }
         finally {

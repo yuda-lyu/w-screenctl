@@ -17,8 +17,12 @@ const sRegion = Joi.object({
     height: sSize.required(),
 })
 const sWindow = Joi.object({
-    x: sCoord.default(0),
-    y: sCoord.default(0),
+    x: sCoord.optional(),
+    y: sCoord.optional(),
+    width: sSize.optional(),
+    height: sSize.optional(),
+}).and('x', 'y').and('width', 'height')
+const sViewport = Joi.object({
     width: sSize.required(),
     height: sSize.required(),
 })
@@ -29,10 +33,12 @@ export const schemaChromeOpen = Joi.object({
     url: Joi.string().uri({ scheme: ['http', 'https', 'about', 'file'] }).optional(),
     mode: Joi.string().valid('reuse', 'replace').optional(),
     window: sWindow.optional(),
+    viewport: sViewport.optional(),
     userData: Joi.string().optional(),
     opt: Joi.object({
         disableGpu: Joi.boolean().default(false),
         disableSandbox: Joi.boolean().default(false),
+        deviceScaleFactor: Joi.number().positive().optional(),
     }).default({}),
 })
 
@@ -53,13 +59,17 @@ export const schemaSystemMouseDblClick = Joi.object({
     x: sCoord.required(), y: sCoord.required(),
 })
 export const schemaSystemMouseDrag = Joi.object({
-    fromX: sCoord.required(), fromY: sCoord.required(),
-    toX: sCoord.required(), toY: sCoord.required(),
+    fromX: sCoord.required(),
+    fromY: sCoord.required(),
+    toX: sCoord.required(),
+    toY: sCoord.required(),
     button: sButton,
 })
 export const schemaSystemMouseScroll = Joi.object({
-    x: sCoord.required(), y: sCoord.required(),
-    direction: sDirSys, amount: sAmount,
+    x: sCoord.required(),
+    y: sCoord.required(),
+    direction: sDirSys,
+    amount: sAmount,
 })
 
 // 系統級鍵盤
@@ -76,13 +86,17 @@ export const schemaChromeMouseDblClick = Joi.object({
     x: sCoord.required(), y: sCoord.required(),
 })
 export const schemaChromeMouseDrag = Joi.object({
-    fromX: sCoord.required(), fromY: sCoord.required(),
-    toX: sCoord.required(), toY: sCoord.required(),
+    fromX: sCoord.required(),
+    fromY: sCoord.required(),
+    toX: sCoord.required(),
+    toY: sCoord.required(),
     button: sButton,
 })
 export const schemaChromeMouseScroll = Joi.object({
-    x: sCoord.required(), y: sCoord.required(),
-    direction: sDirChrome, amount: sAmount,
+    x: sCoord.required(),
+    y: sCoord.required(),
+    direction: sDirChrome,
+    amount: sAmount,
 })
 
 // Chrome 頁面級鍵盤

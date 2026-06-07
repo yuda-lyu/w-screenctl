@@ -36,7 +36,7 @@ async function WScreenctl(opt = {}) {
     let fdUserData = process.env.CHROME_USER_DATA
     if (!isestr(fdUserData)) fdUserData = get(opt, 'fdUserData', null)
     if (!isestr(fdUserData)) {
-         fdUserData = './user_data' 
+        fdUserData = './user_data'
     }
 
     const chromeManager = new ChromeManager()
@@ -74,6 +74,7 @@ async function WScreenctl(opt = {}) {
                 url: p.url,
                 mode: p.mode,
                 window: p.window,
+                viewport: p.viewport,
                 userDataDir: p.userData || fdUserData,
                 opt: p.opt || {},
             })
@@ -304,12 +305,14 @@ async function WScreenctl(opt = {}) {
         const now = Date.now()
         if (healthCache && now - healthCacheTime < HEALTH_TTL) return healthCache
         const m = await backend.getMemoryInfo()
-        healthCache = m ? {
-            total: fmtBytes(m.total),
-            used: fmtBytes(m.used),
-            available: fmtBytes(m.available),
-            chromeRSS: fmtBytes(m.chromeRSS),
-        } : null
+        healthCache = m
+            ? {
+                total: fmtBytes(m.total),
+                used: fmtBytes(m.used),
+                available: fmtBytes(m.available),
+                chromeRSS: fmtBytes(m.chromeRSS),
+            }
+            : null
         healthCacheTime = now
         return healthCache
     }

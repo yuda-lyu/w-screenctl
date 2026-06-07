@@ -6,8 +6,11 @@
 // retry: 'never' | 'after_500ms' | 'after_1s' | 'after_recovery'
 
 const RULES = [
-    { match: /chrome (closed|dead)|Target.*(closed|crashed)|browser has been disconnected|Execution context was destroyed/i,
-        retry: 'after_recovery', code: 'CHROME_NOT_OPEN' },
+    {
+        match: /chrome (closed|dead)|Target.*(closed|crashed)|browser has been disconnected|Execution context was destroyed/i,
+        retry: 'after_recovery',
+        code: 'CHROME_NOT_OPEN'
+    },
     { match: /timeout|timed?\s?out/i, retry: 'after_1s', code: 'TIMEOUT' },
 ]
 
