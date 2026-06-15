@@ -3,6 +3,7 @@ import mk from 'w-mousekey/src/mousekey.mjs'
 import sc from 'w-mousekey/src/screen.mjs'
 import { getChromeRss } from '../util/chromeRss.mjs'
 
+
 // xdotool 風格按鈕碼（1=左, 2=中, 3=右）→ w-mousekey 字串
 const BTN = { 1: 'left', 2: 'middle', 3: 'right' }
 const toBtn = (b) => BTN[b] || 'left'

@@ -1,5 +1,6 @@
 import { classify } from './util/errClassify.mjs'
 
+
 // 把 Error 轉成統一的 { ok: false, error, code, retry } 響應
 export function errResponse(err) {
     const msg = err && err.message ? err.message : String(err)

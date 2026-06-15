@@ -1,5 +1,6 @@
 import Joi from 'joi'
 
+
 // 共用片段
 const sCoord = Joi.number().integer().min(-50000).max(50000)
 const sSize = Joi.number().integer().min(1).max(50000)
