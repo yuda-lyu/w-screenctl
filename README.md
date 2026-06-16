@@ -196,8 +196,9 @@ Body：
   "url": "https://example.com",
   "mode": "reuse",
   "window": { "x": 0, "y": 0, "width": 1280, "height": 800 },
+  "viewport": { "width": 1280, "height": 800 },
   "userData": "/custom/path/to/profile",
-  "opt": { "disableGpu": false, "disableSandbox": false }
+  "opt": { "disableGpu": false, "disableSandbox": false, "deviceScaleFactor": 1 }
 }
 ```
 
@@ -205,10 +206,29 @@ Body：
 |---|---|---|
 | `url` | 否 | 導頁目標；未給則 `about:blank` |
 | `mode` | 否 | 無＝已開時回 `reused: true`（idempotent）；`"replace"`＝關掉重開；`"reuse"`＝同 idempotent，明示意圖 |
-| `window` | 否 | `{x, y, width, height}`；未給則 `--start-maximized` |
+| `window` | 否 | OS 視窗外框：`{x, y, width, height}`，位置與大小可分開給（x/y 成對、width/height 成對）；**位置與大小都未給**才套 `--start-maximized`。見下方[四個正交旋鈕](#四個正交旋鈕window--viewport--devicescalefactor-各自可選) |
+| `viewport` | 否 | 頁面邏輯尺寸 `{width, height}`（CSS 像素）；未給＝WYSIWYG，跟著實際視窗內容區。兩欄位給就都要給 |
 | `userData` | 否 | 完整 user data 路徑（覆寫 server 預設）；未給則用 server 的 `fdUserData` |
 | `opt.disableGpu` | 否 | 預設 `false`（使用顯卡加速）；`true` 加 `--disable-gpu` |
 | `opt.disableSandbox` | 否 | 預設 `false`（保留砂盒，較安全）；`true` 加 `--no-sandbox` |
+| `opt.deviceScaleFactor` | 否 | 像素密度 DPR（正數），加 `--force-device-scale-factor`；未給則跟隨系統螢幕 DPR |
+
+##### 四個正交旋鈕（window / viewport / deviceScaleFactor 各自可選）
+
+Chrome 的「視窗外框」「頁面邏輯尺寸」「像素密度」是三件**獨立**的事，本 API 拆成可各自指定的旋鈕，互不綁定：
+
+| 旋鈕 | 控制什麼 | 對應 chrome / playwright | 不給時 |
+|---|---|---|---|
+| `window.x` / `window.y` | OS 視窗左上角位置 | `--window-position` | 不指定位置 |
+| `window.width` / `window.height` | OS 視窗外框大小（含標題列 / 邊框） | `--window-size` | 不指定大小 |
+| `viewport` | 頁面邏輯尺寸（CSS 像素，`getBoundingClientRect` 的座標系） | context `viewport` | `null` → WYSIWYG，跟著實際視窗內容區 |
+| `opt.deviceScaleFactor` | 像素密度 DPR | `--force-device-scale-factor` | 跟隨系統螢幕 DPR |
+
+- **`window` 位置與大小可分開給**：只給 `{x,y}`（只挪位置）、只給 `{width,height}`（只改大小）、兩者都給、或都不給（→ `--start-maximized`）。x/y 必須成對、width/height 必須成對（Joi `.and`）。
+- **預設不給 `viewport`（WYSIWYG）**：頁面邏輯尺寸 = 實際視窗內容區，截圖所見即視窗所見——這是控制座標的基礎，多數情況維持預設即可。只有需要「不論視窗多大都用固定邏輯尺寸渲染」時才明確給 `viewport`。
+- **`deviceScaleFactor` 與 `viewport` 的搭配**：搭配明確 `viewport` 時，截圖輸出像素 = `viewport × deviceScaleFactor`（context DPR 才會被套上）；只給 `deviceScaleFactor`（viewport 維持 WYSIWYG）只改 Chrome 端渲染 DPR，不強制 context 尺寸。
+
+> ⚠ 混合 DPI 多螢幕環境（各螢幕縮放比不同）下，`--force-device-scale-factor` 可能扭曲 `--window-position` 的落點、或讓視窗跨螢幕跳變。需要精準定位時優先在單一螢幕內操作，或先不給 `deviceScaleFactor` 驗證位置正確再加。
 
 回應：
 ```json
@@ -245,6 +265,11 @@ curl -X POST http://localhost:7000/chrome/open \
 curl -X POST http://localhost:7000/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","userData":"/tmp/chrome-test","window":{"x":0,"y":0,"width":470,"height":900}}'
+
+# 固定頁面邏輯尺寸（viewport）＋ DPR：截圖輸出 = 800×600 × 2 = 1600×1200 px
+curl -X POST http://localhost:7000/chrome/open \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com","viewport":{"width":800,"height":600},"opt":{"deviceScaleFactor":2}}'
 ```
 
 #### 2.2 查詢 Chrome 狀態
