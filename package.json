@@ -1,17 +1,17 @@
 {
   "name": "w-screenctl",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "main": "dist/w-screenctl.umd.js",
   "dependencies": {
     "@hapi/hapi": "^21.4.9",
     "joi": "^18.2.1",
     "lodash-es": "^4.18.1",
-    "playwright": "^1.61.0",
-    "w-mousekey": "^1.0.19",
-    "wsemi": "^1.8.66"
+    "playwright": "^1.61.1",
+    "w-mousekey": "^1.0.20",
+    "wsemi": "^1.8.67"
   },
   "devDependencies": {
-    "w-package-tools": "^1.1.11"
+    "w-package-tools": "^1.1.12"
   },
   "scripts": {
     "test": "mocha --parallel --timeout 60000",
