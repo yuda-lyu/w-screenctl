@@ -45,6 +45,7 @@ describe('e2e: chrome 開→ momo →截圖→關', function() {
         const r = await api('POST', '/chrome/open', {
             url: TARGET_URL,
             window: { x: 0, y: 0, width: 1280, height: 800 },
+            opt: { headless: false }, // 本案驗有頭視窗流程；/chrome/open 預設為 headless
         })
         assert.equal(r.ok, true, `open failed: ${r.error}`)
         assert.equal(r.state, 'open')

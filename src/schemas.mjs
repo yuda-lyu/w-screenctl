@@ -37,6 +37,7 @@ export const schemaChromeOpen = Joi.object({
     viewport: sViewport.optional(),
     userData: Joi.string().optional(),
     opt: Joi.object({
+        headless: Joi.boolean().default(true),
         disableGpu: Joi.boolean().default(false),
         disableSandbox: Joi.boolean().default(false),
         deviceScaleFactor: Joi.number().positive().optional(),

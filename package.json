@@ -1,6 +1,6 @@
 {
   "name": "w-screenctl",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "main": "dist/w-screenctl.umd.js",
   "dependencies": {
     "@hapi/hapi": "^21.4.9",

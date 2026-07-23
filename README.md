@@ -198,7 +198,7 @@ Body：
   "window": { "x": 0, "y": 0, "width": 1280, "height": 800 },
   "viewport": { "width": 1280, "height": 800 },
   "userData": "/custom/path/to/profile",
-  "opt": { "disableGpu": false, "disableSandbox": false, "deviceScaleFactor": 1 }
+  "opt": { "headless": true, "disableGpu": false, "disableSandbox": false, "deviceScaleFactor": 1 }
 }
 ```
 
@@ -209,6 +209,7 @@ Body：
 | `window` | 否 | OS 視窗外框：`{x, y, width, height}`，位置與大小可分開給（x/y 成對、width/height 成對）；**位置與大小都未給**才套 `--start-maximized`。見下方[四個正交旋鈕](#四個正交旋鈕window--viewport--devicescalefactor-各自可選) |
 | `viewport` | 否 | 頁面邏輯尺寸 `{width, height}`（CSS 像素）；未給＝WYSIWYG，跟著實際視窗內容區。兩欄位給就都要給 |
 | `userData` | 否 | 完整 user data 路徑（覆寫 server 預設）；未給則用 server 的 `fdUserData` |
+| `opt.headless` | 否 | 預設 `true`（無實體視窗）；要用系統級滑鼠鍵盤 / 系統截圖操作這個 chrome，或要肉眼看畫面時給 `false` |
 | `opt.disableGpu` | 否 | 預設 `false`（使用顯卡加速）；`true` 加 `--disable-gpu` |
 | `opt.disableSandbox` | 否 | 預設 `false`（保留砂盒，較安全）；`true` 加 `--no-sandbox` |
 | `opt.deviceScaleFactor` | 否 | 像素密度 DPR（正數），加 `--force-device-scale-factor`；未給則跟隨系統螢幕 DPR |
@@ -226,6 +227,7 @@ Chrome 的「視窗外框」「頁面邏輯尺寸」「像素密度」是三件*
 
 - **`window` 位置與大小可分開給**：只給 `{x,y}`（只挪位置）、只給 `{width,height}`（只改大小）、兩者都給、或都不給（→ `--start-maximized`）。x/y 必須成對、width/height 必須成對（Joi `.and`）。
 - **預設不給 `viewport`（WYSIWYG）**：頁面邏輯尺寸 = 實際視窗內容區，截圖所見即視窗所見——這是控制座標的基礎，多數情況維持預設即可。只有需要「不論視窗多大都用固定邏輯尺寸渲染」時才明確給 `viewport`。
+- **headless（預設 `opt.headless: true`）沒有實體視窗**：`/chrome/*` 路由（截圖、導頁、evaluate、chrome 級滑鼠鍵盤）照常運作；但 `/system/*` 系統級滑鼠鍵盤與系統截圖抓不到它，`window.x` / `window.y` 的視窗定位也失去意義。要走系統級操作或肉眼盯畫面時，送 `opt.headless: false`。
 - **`deviceScaleFactor` 與 `viewport` 的搭配**：搭配明確 `viewport` 時，截圖輸出像素 = `viewport × deviceScaleFactor`（context DPR 才會被套上）；只給 `deviceScaleFactor`（viewport 維持 WYSIWYG）只改 Chrome 端渲染 DPR，不強制 context 尺寸。
 
 > ⚠ 混合 DPI 多螢幕環境（各螢幕縮放比不同）下，`--force-device-scale-factor` 可能扭曲 `--window-position` 的落點、或讓視窗跨螢幕跳變。需要精準定位時優先在單一螢幕內操作，或先不給 `deviceScaleFactor` 驗證位置正確再加。
@@ -246,10 +248,15 @@ Chrome 的「視窗外框」「頁面邏輯尺寸」「像素密度」是三件*
 > 採 `waitUntil: 'commit'` + 15s timeout；只等 Chrome 接受導頁就返回，避免 PDF / 串流頁卡死。
 
 ```bash
-# 預設滿版開啟
+# 預設 headless 開啟（無實體視窗，滿版邏輯尺寸）
 curl -X POST http://localhost:7000/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://example.com"}'
+
+# 有頭開啟（要用系統級滑鼠鍵盤 / 系統截圖，或要肉眼看畫面）
+curl -X POST http://localhost:7000/chrome/open \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com", "opt": {"headless": false}}'
 
 # 已開就沿用
 curl -X POST http://localhost:7000/chrome/open \

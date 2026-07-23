@@ -141,6 +141,7 @@ class ChromeManager {
         const { url, window, viewport, userDataDir, opt = {} } = opts
         if (!userDataDir) throw new Error('userDataDir required')
 
+        const headless = opt.headless !== false
         const disableGpu = opt.disableGpu === true
         const disableSandbox = opt.disableSandbox === true
         const hasPos = window && Number.isFinite(window.x) && Number.isFinite(window.y)
@@ -174,7 +175,7 @@ class ChromeManager {
 
         const ctxOpts = {
             channel: 'chrome',
-            headless: false,
+            headless,
             ignoreDefaultArgs: ['--enable-automation'],
             args,
             viewport: _viewport,

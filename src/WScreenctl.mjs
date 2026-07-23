@@ -16,6 +16,9 @@ import * as S from './schemas.mjs'
  *
  * 跨平台支援：Linux 走 xdotool / ImageMagick，Windows 走 w-mousekey / AHK；Chrome 控制全平台皆透過 Playwright
  *
+ * `/chrome/open` 預設以 headless 啟動；需要實體視窗（系統級滑鼠鍵盤 / 系統截圖操作 chrome 時）
+ * 得於 payload 送 `opt.headless: false`
+ *
  * 零信任設計：caller 可任意 retry / 中斷 / agent swap，server 維持自洽狀態。所有 chrome lifecycle
  * 透過 ChromeManager 序列化；所有路由經由 routeFactory 統一錯誤處理；所有 payload 經 Joi 驗證。
  *
@@ -76,7 +79,7 @@ async function WScreenctl(opt = {}) {
                 window: p.window,
                 viewport: p.viewport,
                 userDataDir: p.userData || fdUserData,
-                opt: p.opt || {},
+                opt: p.opt || {}, // opt 含 headless（預設 true）/ disableGpu / disableSandbox / deviceScaleFactor，透傳給 launch
             })
             return { ok: true, ...r }
         }),
