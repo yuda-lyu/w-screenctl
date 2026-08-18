@@ -1,5 +1,5 @@
 /*!
- * chrome-manager v1.0.9
+ * chrome-manager v1.0.10
  * (c) 2018-2021 yuda-lyu(semisphere)
  * Released under the MIT License.
  */
