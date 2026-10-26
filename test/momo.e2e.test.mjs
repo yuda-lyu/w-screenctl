@@ -10,13 +10,14 @@ import WScreenctl from '../src/WScreenctl.mjs'
 const PORT = parseInt(process.env.E2E_PORT || '8080', 10)
 const TARGET_URL = 'https://www.momoshop.com.tw/main/Main.jsp'
 const RENDER_WAIT_MS = 5000
+const TOKEN = 'momo-e2e-test-token-0123456789' // 預設安全後所有端點（除 /health）須 Bearer token
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function api(method, urlPath, body) {
     const r = await fetch(`http://127.0.0.1:${PORT}${urlPath}`, {
         method,
-        headers: body ? { 'Content-Type': 'application/json' } : {},
+        headers: { Authorization: `Bearer ${TOKEN}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
         body: body ? JSON.stringify(body) : undefined,
     })
     return r.json()
@@ -28,7 +29,7 @@ describe('e2e: chrome 開→ momo →截圖→關', function() {
     let server
 
     before(async () => {
-        server = await WScreenctl({ port: PORT })
+        server = await WScreenctl({ port: PORT, token: TOKEN })
     })
 
     after(async () => {

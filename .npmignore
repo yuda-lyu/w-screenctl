@@ -1,0 +1,28 @@
+node_modules
+test/_tmp
+.agents
+CLAUDE*.md
+AGENTS*.md
+.env
+tmp
+.opencode
+.claude
+user_data
+
+
+# 指引要求文件入 git 版控、不入 npm 包(2026-10-22)
+sgud
+
+
+# 開發用檔不入 npm 包(以 / 開頭表示僅限套件根目錄)(2026-10-26, 以 npm pack --dry-run 為準)
+# 須入包: dist/(main 入口)、src/(g.mjs 與 README 匯入)、g.mjs(README 與 service/ 之啟動腳本)、service/(README 引用)、README.md、SECURITY.md、LICENSE、package.json
+# docs/ 為 gh-pages 部署用 JSDoc 靜態站(npm run deploy), 不入包
+/docs/
+/test/
+/toolg/
+/script.txt
+/.editorconfig
+/.eslintignore
+/.eslintrc.js
+/.jsdoc
+/babel.config.js

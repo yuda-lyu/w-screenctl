@@ -34,48 +34,144 @@ sudo apt install xdotool imagemagick
 sudo dnf install xdotool ImageMagick
 ```
 
+## Upgrade Notes
+
+### 預設安全化（破壞性變更；1.0.26 之後的版本起）
+
+早期版本啟動即於 `0.0.0.0:7000` 開放**無認證、CORS 全開**之 HTTP 服務，且含 `POST /chrome/evaluate`（任意 JS）與系統級 `/keyboard/*`、`/mouse/*`：同網段任何人，乃至使用者瀏覽之任意網頁（跨站請求），皆可操控主機（見 OSV MAL-2026-13618 與 [SECURITY.md](SECURITY.md)）。本套件之用途（讓開發者與 AI agent 以 HTTP 操控瀏覽器與桌面）不變，但改為**預設安全**：
+
+| 項目 | 舊行為 | 新行為 | 需要舊行為時 |
+|---|---|---|---|
+| 監聽位址 | `0.0.0.0`（區網可連） | `127.0.0.1`（僅本機） | `host` 選項／`SCREENCTL_HOST`。綁非迴路位址**必須先給 token**，否則拒絕啟動 |
+| 認證 | 無 | 除 `GET /health` 外，所有端點須 `Authorization: Bearer <token>` | token 未給時啟動自動產生。**無法關閉驗證** |
+| CORS／跨站 | 全開 | 關閉：帶 `Origin` 之請求一律 403，`Host` 標頭須為本機名稱（擋 DNS rebinding） | `allowedOrigins` 白名單（仍須 token） |
+| `POST /chrome/evaluate` | 開 | **關**（403 `EVALUATE_DISABLED`） | `enableEvaluate: true`／`SCREENCTL_ENABLE_EVALUATE=1`／`node g.mjs --evaluate` |
+| 其餘（端點路徑、功能語意、payload、回應格式） | | 不變 | |
+
+升級時要做的事：
+
+1. 呼叫端對所有端點（`/health` 除外）加上 `Authorization: Bearer <token>`，位址改用 `http://127.0.0.1:<port>`。
+2. 呼叫端在另一台機器：優先用 SSH 通道（`ssh -L 7000:127.0.0.1:7000 host`）；確需直連才綁非迴路位址並自行設 token（見[安全預設](#安全預設)）。
+3. 依賴 `/chrome/evaluate` 者：啟動時顯式開啟。
+4. 由網頁直接呼叫本服務者：設 `allowedOrigins`，且仍須帶 token。
+5. 程式內呼叫（`WScreenctl({...})`）未給 `token` 時，會自動產生並寫入 `~/.w-screenctl/token-<port>`；測試或 CI 請明給 `token`（不會寫檔）。
+6. 自動啟動設定（`service/`）已改為本機綁定，token 由環境變數或檔案提供，見[自動啟動 / 部署](#自動啟動--部署)。
+
 ## API 控制說明
 
 w-screenctl 啟動後對外提供 REST API，讓外部程式 / AI agent 透過 HTTP 控制：
 - **作業系統桌面**：滑鼠、鍵盤、桌面截圖（Linux 走 xdotool / ImageMagick；Windows 走 w-mousekey / AHK）
 - **Chrome 瀏覽器**：開關、導頁、頁面截圖、執行 JS、頁面內滑鼠鍵盤事件（透過 Playwright；跨平台）
 
+> ⚠ 能呼叫本服務者即擁有該主機之滑鼠、鍵盤與 Chrome 控制權。預設只綁本機並要求 token，請妥善保管 token，細節見[安全預設](#安全預設)。
+
 ### 啟動
+
+#### 最省事：本機開發／AI agent
+
+```bash
+node g.mjs
+# running at http://127.0.0.1:7000 (platform=...)
+# [security] bind=127.0.0.1 (loopback only) | auth=Bearer token (generated) | evaluate=disabled | cors=off
+# [security] token file: /home/you/.w-screenctl/token-7000     ← token 自動產生並寫在此檔（不會印出 token 全文）
+
+TOKEN=$(cat ~/.w-screenctl/token-7000)
+curl http://127.0.0.1:7000/health                                          # 免 token
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7000/chrome        # 其餘都要 token
+
+node g.mjs --evaluate           # 需要 /chrome/evaluate 時顯式開啟（等同 SCREENCTL_ENABLE_EVALUATE=1）
+PORT=8000 node g.mjs            # 改 port（token 檔隨之改為 ~/.w-screenctl/token-8000）
+```
+
+以 npm 安裝者，啟動腳本在套件內：`node node_modules/w-screenctl/g.mjs`。要在背景啟動並把 token 檔放在專案暫存夾（不碰家目錄）：`SCREENCTL_TOKEN_FILE=./tmp/screenctl.token nohup node node_modules/w-screenctl/g.mjs > ./tmp/screenctl.log 2>&1 &`，之後 `TOKEN=$(cat ./tmp/screenctl.token)`。
+
+Windows PowerShell 取 token：`$TOKEN = (Get-Content "$HOME\.w-screenctl\token-7000").Trim()`；用 `curl.exe`（不是 `curl` 別名）呼叫。自行指定 token 亦可：`SCREENCTL_TOKEN=<16 字元以上之隨機字串> node g.mjs`。
 
 #### 程式內呼叫
 
 ```js
 import WScreenctl from 'w-screenctl'
 
-const server = await WScreenctl({ port: 7000 })
-// 啟動後印出: running at http://0.0.0.0:7000 (platform=...)
+const server = await WScreenctl({ port: 7000, token: process.env.MY_TOKEN })
+// 啟動後印出: running at http://127.0.0.1:7000 (platform=...)
+// 未給 token：自動產生並寫入 ~/.w-screenctl/token-7000；綁非迴路位址又未給 token：丟出 Error（code 'SCREENCTL_CONFIG'）拒絕啟動
 ```
 
-#### 命令列直接啟動
+#### 命令列旗標（`node g.mjs`）
 
-專案根目錄附 `g.mjs` 啟動腳本：
+旗標只是 `WScreenctl` 選項之捷徑；**沒有 `--token`**（會出現在行程列表與 shell 歷史），token 請用環境變數或檔案。
 
-```bash
-node g.mjs
-PORT=8000 node g.mjs    # 改 port
-```
+| 旗標 | 對應選項 | 說明 |
+|---|---|---|
+| `--host <addr>` | `host` | 監聽位址；非迴路位址須已有 token |
+| `--token-file <path>` | `tokenFile` | 檔案存在則讀其內容為 token；不存在則自動產生並寫入該檔 |
+| `--evaluate` | `enableEvaluate` | 開啟 `POST /chrome/evaluate` |
+| `--allow-origin <origin>` | `allowedOrigins` | 放行跨站 Origin，可重複 |
+| `--allow-host <name>` | `allowedHosts` | 額外接受之 Host 名稱，可重複 |
+| `-h`、`--help` | | 顯示用法 |
 
 開機自動啟動見 [自動啟動 / 部署](#自動啟動--部署)。
 
-| 設定 | 來源 | 說明 |
+#### 設定一覽
+
+| 設定 | 選項 | 環境變數 | 預設 | 優先序 |
+|---|---|---|---|---|
+| Port | `port` | `PORT` | `7000` | 環境變數 > 選項（既有行為） |
+| Chrome user data 目錄 | `fdUserData` | `CHROME_USER_DATA` | 當前工作路徑 `./user_data/`（首次啟動自動建立） | 環境變數 > 選項（既有行為） |
+| 監聽位址 | `host` | `SCREENCTL_HOST` | `127.0.0.1` | 選項 > 環境變數 |
+| Bearer token | `token` | `SCREENCTL_TOKEN` | 自動產生（僅迴路位址） | 選項 > 環境變數 > token 檔 > 自動產生 |
+| token 檔 | `tokenFile` | `SCREENCTL_TOKEN_FILE` | `~/.w-screenctl/token-<port>` | 選項 > 環境變數 |
+| 開啟 `/chrome/evaluate` | `enableEvaluate` | `SCREENCTL_ENABLE_EVALUATE`（`1`/`true`/`yes`/`on`） | 關 | 選項 > 環境變數 |
+| 跨站 Origin 白名單 | `allowedOrigins`（陣列或逗號字串） | `SCREENCTL_ALLOWED_ORIGINS` | 空（全拒） | 選項 > 環境變數 |
+| 額外 Host 名稱 | `allowedHosts`（陣列或逗號字串） | `SCREENCTL_ALLOWED_HOSTS` | 空 | 選項 > 環境變數 |
+
+### 安全預設
+
+| 面向 | 預設行為 |
+|---|---|
+| 監聽 | 只綁 `127.0.0.1`。綁其他位址（`0.0.0.0`、區網 IP…）而**沒有 token** → 拒絕啟動並印出原因；有 token 仍會印出警告（token 以明文走 HTTP） |
+| 認證 | 除 `GET /health` 外一律 `Authorization: Bearer <token>`，以定時比較（`crypto.timingSafeEqual`）驗證；缺、錯皆 `401`。**沒有任何值或旗標可停用驗證**（`token: false`、空字串都視為「未給」） |
+| 跨站 | 不輸出任何 CORS 標頭；請求帶 `Origin`（瀏覽器跨站請求與預檢）預設 `403`；`Host` 標頭須為 `localhost`／`127.0.0.1`／`[::1]`（擋 DNS rebinding），否則 `403`。`/health` 亦受這兩項檢查。標頭解析從嚴：重複的 `Host`／`Authorization` 標頭、以 NBSP 等非 HTTP 空白包夾的值一律拒絕 |
+| 高權限端點 | `POST /chrome/evaluate`（任意 JS）預設 `403 EVALUATE_DISABLED`，須顯式開啟。系統級 `/keyboard/*`、`/mouse/*`、`/screenshot` 為本套件主要用途，維持開啟，但受 token 保護 |
+| log | 不印 token 全文，只印來源與 token 檔路徑 |
+
+**為什麼只綁本機仍要 token**：不設認證時，使用者瀏覽的任何網頁都能對 `http://127.0.0.1:7000` 送請求（跨站偽造），DNS rebinding 亦可繞過同源限制；token 是唯一不靠瀏覽器行為的防線，`Host`／`Origin` 檢查則是縱深防禦。
+
+**token 格式與取得**
+
+- 16～256 個可印字元（ASCII `!`～`~`，不含空白）；不合規格拒絕啟動（不回顯 token）。自動產生者為 43 字元之隨機字串（256 bit）。
+- 未給時**每次啟動重新產生**（舊 token 作廢），寫入 `tokenFile`（預設 `~/.w-screenctl/token-<port>`；綁定位址不是預設的 `127.0.0.1` 時為 `token-<位址>-<port>`，同 port 不同位址之實例不會共用同一檔）。檔案在 server 成功綁定 port 後才寫，故第二個實例因 port 衝突而失敗時不會覆寫執行中實例之 token。寫入一律先寫同目錄暫存檔再一次到位（失敗時舊檔原封不動）；你以 `tokenFile` 明指、而啟動期間被另一個程序先建立時，會拒絕啟動而不覆寫（請讓每個實例用自己的檔案）。
+- `allowedOrigins` 會正規化成瀏覽器送出之 Origin 表示法（小寫、去預設 port：`https://x:443` 即 `https://x`、去前導零、IPv4 簡寫展開），允許一個尾斜線（`https://x/`）；含路徑、多個尾斜線、無效 IPv6、超界 port、非字串元素一律拒絕啟動。請求之 `Origin` 與正規化後之白名單逐字比對。
+- 權限：POSIX 目錄 `0700`、檔案 `0600`；Windows 之 mode 位元無作用，權限取決於所在資料夾之 ACL（使用者家目錄預設僅本人與系統管理者可讀）。若改用共用資料夾請自行收緊 ACL。
+- 要固定 token（例如 service）：預先建立 token 檔（`openssl rand -base64 32 > ~/.config/screenctl/token && chmod 600 ~/.config/screenctl/token`），以 `SCREENCTL_TOKEN_FILE`／`--token-file` 指向它。檔案須存為 UTF-8／ASCII（PowerShell 5.1 之 `>` 會寫出 UTF-16，請用 `Set-Content -Encoding ascii`）。
+- 輪替：改檔案內容（或刪檔）後重啟。
+
+**驗證失敗之回應**（皆為 `{ ok:false, error, code, retry:'never' }`）：
+
+| HTTP | `code` | 觸發 |
 |---|---|---|
-| Port | env `PORT` > `opt.port` > `7000` | 全部失效時用預設 7000 |
-| Chrome user data 目錄 | env `CHROME_USER_DATA` > `opt.fdUserData` > 當前工作路徑 `./user_data/` | 首次啟動自動建立 |
+| 401 | `UNAUTHORIZED` | 缺 `Authorization`、方案不是 Bearer、token 錯（附 `WWW-Authenticate: Bearer`） |
+| 403 | `FORBIDDEN_HOST` | `Host` 標頭不在白名單 |
+| 403 | `FORBIDDEN_ORIGIN` | 請求帶 `Origin` 且不在 `allowedOrigins` |
+| 403 | `EVALUATE_DISABLED` | 呼叫 `/chrome/evaluate` 但未開啟（需先通過 token 驗證） |
+
+**綁非迴路位址（不建議）**：token 以明文走 HTTP，且 `Host` 不檢查（除非設 `allowedHosts`）。請改用 SSH 通道或 TLS 反向代理，並以防火牆限制來源。能呼叫者等同取得主機之鍵鼠與 Chrome 控制權（含 `file://` 讀取與有頭 Chrome 之任意操作），請視 token 為主機密碼。
 
 ### 通用約定
 
-- Base URL：`http://{host}:{port}`，預設 `http://0.0.0.0:7000`
+- Base URL：`http://127.0.0.1:{port}`，預設 `http://127.0.0.1:7000`（請用 `127.0.0.1`；部分用戶端會先解析 `localhost` 為 `::1` 而連不上）
+- 除 `GET /health` 外，所有請求須帶 `Authorization: Bearer <token>`（以下範例以 `$AUTH` 代表此標頭）
 - 所有 POST 用 `Content-Type: application/json`
 - 回應一律 JSON
 - 截圖一律 base64 PNG
 - 座標皆以左上角為原點
-- CORS 全開
+- CORS 預設關閉（見[安全預設](#安全預設)）
 - payload 上限 10 MB
+
+```bash
+HOST=http://127.0.0.1:7000
+AUTH="Authorization: Bearer $(cat ~/.w-screenctl/token-7000)"
+```
 
 ### 響應契約
 
@@ -99,6 +195,10 @@ PORT=8000 node g.mjs    # 改 port
 `code` 是穩定的程式判斷 key（caller 寫分支用，比 message 字串穩）：
 | `code` | 觸發情境 |
 |---|---|
+| `UNAUTHORIZED` | 缺 / 錯 Bearer token（HTTP 401） |
+| `FORBIDDEN_HOST` | `Host` 標頭不在白名單，疑似 DNS rebinding（HTTP 403） |
+| `FORBIDDEN_ORIGIN` | 請求帶 `Origin` 且不在 `allowedOrigins`，即跨站請求（HTTP 403） |
+| `EVALUATE_DISABLED` | `/chrome/evaluate` 未開啟（HTTP 403） |
 | `VALIDATION` | Joi schema 拒絕 payload（HTTP 400） |
 | `CHROME_NOT_OPEN` | chrome 不是 open（含 caller 操作期間 chromium 死亡） |
 | `TIMEOUT` | 任何 timeout 字樣（launch / goto / evaluate / close） |
@@ -150,8 +250,10 @@ caller 可任意 retry / 中斷 / agent swap，server 維持自洽：
 |---|---|
 | `GET` | `/health` |
 
+> **唯一免 token 之端點**（`GET`，`HEAD` 隨之；仍受 `Host`／`Origin` 檢查）。
+
 ```bash
-curl http://localhost:7000/health
+curl $HOST/health
 ```
 
 回應：
@@ -249,32 +351,32 @@ Chrome 的「視窗外框」「頁面邏輯尺寸」「像素密度」是三件*
 
 ```bash
 # 預設 headless 開啟（無實體視窗，滿版邏輯尺寸）
-curl -X POST http://localhost:7000/chrome/open \
+curl -H "$AUTH" -X POST $HOST/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://example.com"}'
 
 # 有頭開啟（要用系統級滑鼠鍵盤 / 系統截圖，或要肉眼看畫面）
-curl -X POST http://localhost:7000/chrome/open \
+curl -H "$AUTH" -X POST $HOST/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://example.com", "opt": {"headless": false}}'
 
 # 已開就沿用
-curl -X POST http://localhost:7000/chrome/open \
+curl -H "$AUTH" -X POST $HOST/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://example.com", "mode": "reuse"}'
 
 # 關閉舊的再重開
-curl -X POST http://localhost:7000/chrome/open \
+curl -H "$AUTH" -X POST $HOST/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url": "https://example.com", "mode": "replace"}'
 
 # 自訂 user data 與視窗
-curl -X POST http://localhost:7000/chrome/open \
+curl -H "$AUTH" -X POST $HOST/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","userData":"/tmp/chrome-test","window":{"x":0,"y":0,"width":470,"height":900}}'
 
 # 固定頁面邏輯尺寸（viewport）＋ DPR：截圖輸出 = 800×600 × 2 = 1600×1200 px
-curl -X POST http://localhost:7000/chrome/open \
+curl -H "$AUTH" -X POST $HOST/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","viewport":{"width":800,"height":600},"opt":{"deviceScaleFactor":2}}'
 ```
@@ -286,7 +388,7 @@ curl -X POST http://localhost:7000/chrome/open \
 | `GET` | `/chrome` |
 
 ```bash
-curl http://localhost:7000/chrome
+curl -H "$AUTH" $HOST/chrome
 ```
 
 回應永遠回 `state` 欄位，state 為 `open` 或 `closed`：
@@ -364,6 +466,8 @@ Body：
 |---|---|
 | `POST` | `/chrome/evaluate` |
 
+> ⚠ **預設關閉**：未開啟時回 `403 { "ok": false, "code": "EVALUATE_DISABLED", ... }`（需先通過 token 驗證，且先於 payload 驗證）。此端點可在受控頁面執行任意 JS，請僅於需要時開啟：`node g.mjs --evaluate`、環境變數 `SCREENCTL_ENABLE_EVALUATE=1`，或程式內 `WScreenctl({ enableEvaluate: true })`。啟動時會印出警告。
+
 Body：
 ```json
 { "script": "document.title" }
@@ -416,11 +520,11 @@ Body（皆選填）：
 
 ```bash
 # 全螢幕
-curl -X POST http://localhost:7000/screenshot \
+curl -H "$AUTH" -X POST $HOST/screenshot \
   -H 'Content-Type: application/json' -d '{}'
 
 # 區域
-curl -X POST http://localhost:7000/screenshot \
+curl -H "$AUTH" -X POST $HOST/screenshot \
   -H 'Content-Type: application/json' \
   -d '{"region":{"x":100,"y":100,"width":800,"height":600}}'
 ```
@@ -440,24 +544,24 @@ curl -X POST http://localhost:7000/screenshot \
 
 ```bash
 # 左鍵點 (960, 540)
-curl -X POST http://localhost:7000/mouse/click \
+curl -H "$AUTH" -X POST $HOST/mouse/click \
   -H 'Content-Type: application/json' -d '{"x":960,"y":540}'
 
 # 右鍵點
-curl -X POST http://localhost:7000/mouse/click \
+curl -H "$AUTH" -X POST $HOST/mouse/click \
   -H 'Content-Type: application/json' -d '{"x":960,"y":540,"button":3}'
 
 # 雙擊
-curl -X POST http://localhost:7000/mouse/dblclick \
+curl -H "$AUTH" -X POST $HOST/mouse/dblclick \
   -H 'Content-Type: application/json' -d '{"x":960,"y":540}'
 
 # 拖曳
-curl -X POST http://localhost:7000/mouse/drag \
+curl -H "$AUTH" -X POST $HOST/mouse/drag \
   -H 'Content-Type: application/json' \
   -d '{"fromX":100,"fromY":200,"toX":500,"toY":200}'
 
 # 向下滾 5 格
-curl -X POST http://localhost:7000/mouse/scroll \
+curl -H "$AUTH" -X POST $HOST/mouse/scroll \
   -H 'Content-Type: application/json' \
   -d '{"x":960,"y":540,"direction":"down","amount":5}'
 ```
@@ -475,19 +579,19 @@ curl -X POST http://localhost:7000/mouse/scroll \
 
 ```bash
 # 單鍵
-curl -X POST http://localhost:7000/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"Return"}'
 
 # Ctrl+A
-curl -X POST http://localhost:7000/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"ctrl+a"}'
 
 # Alt+F4
-curl -X POST http://localhost:7000/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"alt+F4"}'
 
 # Win+R（執行對話框）
-curl -X POST http://localhost:7000/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"super+r"}'
 ```
 
@@ -515,11 +619,11 @@ ASCII 與非 ASCII（中文 / emoji）皆可。Linux 用 `xdotool type` + `xdoto
 
 ```bash
 # 英文
-curl -X POST http://localhost:7000/keyboard/type \
+curl -H "$AUTH" -X POST $HOST/keyboard/type \
   -H 'Content-Type: application/json' -d '{"text":"hello world"}'
 
 # 中文
-curl -X POST http://localhost:7000/keyboard/type \
+curl -H "$AUTH" -X POST $HOST/keyboard/type \
   -H 'Content-Type: application/json' -d '{"text":"你好世界"}'
 ```
 
@@ -548,7 +652,7 @@ curl -X POST http://localhost:7000/keyboard/type \
 
 ```bash
 # 點頁面 (560, 496)
-curl -X POST http://localhost:7000/chrome/mouse/click \
+curl -H "$AUTH" -X POST $HOST/chrome/mouse/click \
   -H 'Content-Type: application/json' -d '{"x":560,"y":496}'
 ```
 
@@ -558,15 +662,15 @@ curl -X POST http://localhost:7000/chrome/mouse/click \
 
 ```bash
 # 單鍵
-curl -X POST http://localhost:7000/chrome/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/chrome/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"Enter"}'
 
 # Ctrl+A（注意大寫的 Control，與系統級的 ctrl 不同）
-curl -X POST http://localhost:7000/chrome/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/chrome/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"Control+A"}'
 
 # 輸入文字
-curl -X POST http://localhost:7000/chrome/keyboard/type \
+curl -H "$AUTH" -X POST $HOST/chrome/keyboard/type \
   -H 'Content-Type: application/json' -d '{"text":"Hello 世界"}'
 ```
 
@@ -587,47 +691,49 @@ curl -X POST http://localhost:7000/chrome/keyboard/type \
 #### 開頁面 → 截圖 → 點按鈕 → 輸入
 
 ```bash
-HOST=http://localhost:7000
+HOST=http://127.0.0.1:7000
+AUTH="Authorization: Bearer $(cat ~/.w-screenctl/token-7000)"
 
 # 1. 開 Chrome
-curl -X POST $HOST/chrome/open \
+curl -H "$AUTH" -X POST $HOST/chrome/open \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","mode":"reuse"}'
 
-# 2. 用 evaluate 查欄位實際座標（別目測截圖）
-curl -X POST $HOST/chrome/evaluate \
+# 2. 用 evaluate 查欄位實際座標（別目測截圖；須以 --evaluate 啟動）
+curl -H "$AUTH" -X POST $HOST/chrome/evaluate \
   -H 'Content-Type: application/json' \
   -d '{"script":"Array.from(document.querySelectorAll(\"input\")).map(i=>{const r=i.getBoundingClientRect();return {type:i.type,x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})"}'
 
 # 3. 頁面內點欄位 + 輸入
-curl -X POST $HOST/chrome/mouse/click \
+curl -H "$AUTH" -X POST $HOST/chrome/mouse/click \
   -H 'Content-Type: application/json' -d '{"x":560,"y":496}'
-curl -X POST $HOST/chrome/keyboard/type \
+curl -H "$AUTH" -X POST $HOST/chrome/keyboard/type \
   -H 'Content-Type: application/json' -d '{"text":"admin"}'
 
 # 4. 頁面截圖確認
-curl -X POST $HOST/chrome/screenshot
+curl -H "$AUTH" -X POST $HOST/chrome/screenshot
 ```
 
 #### 切換到其他 app（系統級操作）
 
 ```bash
-HOST=http://localhost:7000
+HOST=http://127.0.0.1:7000
+AUTH="Authorization: Bearer $(cat ~/.w-screenctl/token-7000)"
 
 # 1. 系統級 Win+R（叫出執行對話框）
-curl -X POST $HOST/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"super+r"}'
 
 # 2. 系統級輸入
-curl -X POST $HOST/keyboard/type \
+curl -H "$AUTH" -X POST $HOST/keyboard/type \
   -H 'Content-Type: application/json' -d '{"text":"notepad"}'
 
 # 3. Enter
-curl -X POST $HOST/keyboard/key \
+curl -H "$AUTH" -X POST $HOST/keyboard/key \
   -H 'Content-Type: application/json' -d '{"keys":"Return"}'
 
 # 4. 全螢幕截圖
-curl -X POST $HOST/screenshot \
+curl -H "$AUTH" -X POST $HOST/screenshot \
   -H 'Content-Type: application/json' -d '{}'
 ```
 
@@ -708,6 +814,19 @@ service/
 | `ExecStart` | `/usr/bin/node g.mjs` | node 路徑用 `which node` 確認 |
 | `Environment=DISPLAY=:99` | 預設保留 | headless 環境刪除；有 X server / VNC 才需要 |
 | `After / Requires=vnc.service` | 預設保留 | 沒有 VNC service 就刪掉這兩行 |
+| `Environment=SCREENCTL_TOKEN_FILE=…` | `/home/YOUR_USERNAME/.config/screenctl/token` | 把 `YOUR_USERNAME` 改成同一使用者 |
+
+單元已預設**只綁本機**（`SCREENCTL_HOST=127.0.0.1`）且**token 由檔案提供**；`/chrome/evaluate` 預設關閉，需要時取消註解 `Environment=SCREENCTL_ENABLE_EVALUATE=1`。建議先建好 token 檔（固定 token，重啟不變；未建則首次啟動自動產生並寫入，權限 `0600`）：
+
+```bash
+sudo -u YOUR_USERNAME install -d -m 700 /home/YOUR_USERNAME/.config/screenctl
+openssl rand -base64 32 | sudo -u YOUR_USERNAME tee /home/YOUR_USERNAME/.config/screenctl/token > /dev/null
+sudo chmod 600 /home/YOUR_USERNAME/.config/screenctl/token
+
+# 呼叫端取用
+TOKEN=$(cat /home/YOUR_USERNAME/.config/screenctl/token)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7000/chrome
+```
 
 #### 安裝 / 啟動
 
@@ -754,6 +873,12 @@ sudo systemctl daemon-reload
 | `<WorkingDirectory>` | `C:\screenctl` | 專案根目錄絕對路徑 |
 
 要覆寫 `PORT` / `CHROME_USER_DATA` 等環境變數，把 `<Command>` 改成 `cmd.exe`、`<Arguments>` 包成 `/c set PORT=8000 && node g.mjs`。
+
+設定檔已採安全預設，**不需改動即只綁本機並要求 token**：
+
+- `g.mjs` 預設監聽 `127.0.0.1`；每次啟動自動產生 token，寫入執行此工作之使用者的 `%USERPROFILE%\.w-screenctl\token-<port>`（啟動輸出不印 token 全文）。呼叫端取用：`(Get-Content "$HOME\.w-screenctl\token-7000").Trim()`。
+- 要固定 token（重啟不變）：`<Arguments>` 改為 `g.mjs --token-file C:\Users\你的使用者\.w-screenctl\token.txt`（檔案存在則讀取，不存在則首次啟動自動產生並寫入；請存為 UTF-8／ASCII，且勿放在 `C:\` 根目錄下之共用資料夾）。XML 註解內不可出現連續兩個減號，故設定檔內以文字說明，旗標寫法以本節為準。
+- `/chrome/evaluate` 預設關閉；需要時 `<Arguments>` 加 `--evaluate`。
 
 #### 安裝 / 啟動（管理員 cmd）
 

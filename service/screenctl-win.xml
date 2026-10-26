@@ -16,6 +16,21 @@
        例：/c set PORT=8000 && node g.mjs
        並把 <Command> 改成 cmd.exe
 
+  ── 安全預設（本服務可遠端操控主機鍵鼠，請勿放寬）──────────────
+    只綁本機：g.mjs 預設監聽 127.0.0.1（不需任何設定）。
+      綁其他位址（host 旗標指定 0.0.0.0、區網 IP）而沒有 token 時，服務會拒絕啟動。
+    所有端點（/health 除外）須 `Authorization: Bearer <token>`：
+      預設每次啟動自動產生 token，寫入「執行此工作之使用者」的 %USERPROFILE%\.w-screenctl\token-<port>
+      （使用者家目錄預設僅本人與系統管理者可讀；啟動輸出不印 token 全文）。
+      呼叫端取用（PowerShell）：(Get-Content "$HOME\.w-screenctl\token-7000").Trim()
+      要固定 token（重啟不變）：<Arguments> 於 g.mjs 之後加 token-file 旗標（兩個減號開頭）與檔案路徑，
+        例：路徑用 C:\Users\你的使用者\.w-screenctl\token.txt（旗標寫法見 README「命令列旗標」）。
+      該檔存在則讀其內容為 token，不存在則首次啟動自動產生並寫入。
+      請勿把 token 檔放在 C:\ 根目錄下之共用資料夾（預設 ACL 允許其他使用者讀取），除非自行收緊權限。
+      檔案須存為 UTF-8／ASCII（PowerShell 5.1 之 > 會寫出 UTF-16）。
+    /chrome/evaluate（任意 JS）預設關閉；需要時 <Arguments> 於 g.mjs 之後加 evaluate 旗標（兩個減號開頭）。
+    其餘旗標與完整說明見 README「命令列旗標」「安全預設」。
+
   ── 安裝（管理員 cmd） ──────────────────────────────────────
     schtasks /create /tn "screenctl-api" /xml service\screenctl-win.xml
 

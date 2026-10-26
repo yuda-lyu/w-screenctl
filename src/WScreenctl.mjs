@@ -9,6 +9,7 @@ import bkWin from './backend/bkWin.mjs'
 import ChromeManager from './chromeManager.mjs'
 import { systemRoute, chromeRoute, lifecycleRoute, errResponse } from './routeFactory.mjs'
 import * as S from './schemas.mjs'
+import { resolveSecurity, createGate, describeSecurity, persistToken } from './security.mjs'
 
 
 /**
@@ -22,9 +23,23 @@ import * as S from './schemas.mjs'
  * 零信任設計：caller 可任意 retry / 中斷 / agent swap，server 維持自洽狀態。所有 chrome lifecycle
  * 透過 ChromeManager 序列化；所有路由經由 routeFactory 統一錯誤處理；所有 payload 經 Joi 驗證。
  *
+ * 預設安全（1.0.26 之後的版本起；破壞性變更）：
+ * - 只綁 127.0.0.1；綁其他位址須自行提供 token，否則拒絕啟動（丟出 code 為 SCREENCTL_CONFIG 之 Error）
+ * - 除 `GET /health` 外所有端點須 `Authorization: Bearer <token>`（定時比較）。token 未給時啟動自動產生並寫入 token 檔
+ * - 預設不開 CORS；Host 標頭須為本機名稱（擋 DNS rebinding）；帶 Origin 之請求預設一律拒絕，可由 `allowedOrigins` 放行白名單
+ * - `/chrome/evaluate` 預設關閉（403），須 `enableEvaluate` 顯式開啟
+ * 新增之安全選項優先序皆為：選項 > 環境變數 > 預設（`port`、`fdUserData` 維持既有之環境變數優先）
+ *
  * @param {Object} [opt={}] 輸入設定物件
  * @param {Integer} [opt.port=7000] 服務監聽 port，優先序：env PORT > opt.port > 7000
  * @param {String} [opt.fdUserData] Chrome user data 資料夾路徑，優先序：env CHROME_USER_DATA > opt.fdUserData > 當前工作路徑下的 ./user_data
+ * @param {String} [opt.host='127.0.0.1'] 監聽位址，優先序：opt.host > env SCREENCTL_HOST > 127.0.0.1。非迴路位址（如 0.0.0.0）且未提供 token 時拒絕啟動
+ * @param {String} [opt.token] Bearer token（16~256 個可印字元、不含空白），優先序：opt.token > env SCREENCTL_TOKEN > token 檔 > 自動產生（僅迴路位址）。無法以任何值停用驗證
+ * @param {String} [opt.tokenFile] token 檔路徑，優先序：opt.tokenFile > env SCREENCTL_TOKEN_FILE。檔案存在則讀取其內容為 token；不存在（且為迴路位址）則自動產生並寫入該檔；皆未給時寫入 `<家目錄>/.w-screenctl/token-<port>`（host 非預設時為 `token-<host>-<port>`；每次啟動重新產生並以暫存檔原子取代）。明指之檔只新建、不覆寫（啟動期間被他人先建立即拒絕啟動）。權限：POSIX 為 0600，Windows 依資料夾 ACL
+ * @param {Boolean} [opt.enableEvaluate=false] 是否開啟 `POST /chrome/evaluate`（任意 JS 執行），優先序：opt.enableEvaluate > env SCREENCTL_ENABLE_EVALUATE（1/true/yes/on）> 關閉
+ * @param {Array<String>|String} [opt.allowedOrigins=[]] 允許跨站呼叫之 Origin 白名單（`scheme://host[:port]`，可為陣列或逗號分隔字串，元素須為字串；不接受 `*`、`null`、含路徑者，並正規化成瀏覽器送出之 Origin 表示法），優先序：opt.allowedOrigins > env SCREENCTL_ALLOWED_ORIGINS。預設空＝帶 Origin 之請求一律 403 且不輸出 CORS 標頭
+ * @param {Object} [opt.backend] 進階／測試用：以替身取代系統級後端（須提供 screenshot、mouseClick、mouseDblClick、mouseDrag、mouseScroll、keyboardKey、keyboardType、getMemoryInfo）；預設依平台使用 bkWin／bkLinux
+ * @param {Array<String>|String} [opt.allowedHosts=[]] 額外允許之 Host 標頭主機名稱（例：反向代理之對外名稱），優先序：opt.allowedHosts > env SCREENCTL_ALLOWED_HOSTS。綁迴路位址時另內建 localhost、127.0.0.1、[::1]；綁非迴路位址且未設時不檢查 Host
  * @returns {Promise<Server>} Hapi server 實例
  */
 async function WScreenctl(opt = {}) {
@@ -34,13 +49,18 @@ async function WScreenctl(opt = {}) {
     if (!ispint(port)) port = 7000
     port = cint(port)
 
-    const backend = process.platform === 'win32' ? bkWin : bkLinux
+    // opt.backend：進階／測試用，以替身取代系統級後端（screenshot、mouse*、keyboard*、getMemoryInfo），測試才不必真的操作桌面
+    const backend = get(opt, 'backend', null) || (process.platform === 'win32' ? bkWin : bkLinux)
 
     let fdUserData = process.env.CHROME_USER_DATA
     if (!isestr(fdUserData)) fdUserData = get(opt, 'fdUserData', null)
     if (!isestr(fdUserData)) {
         fdUserData = './user_data'
     }
+
+    // 安全設定須在綁 port 之前解析：設定有誤或不安全（例：綁非迴路位址卻無 token）即拒絕啟動
+    const sec = resolveSecurity(opt, process.env, { port })
+    const gate = createGate(sec)
 
     const chromeManager = new ChromeManager()
 
@@ -56,13 +76,18 @@ async function WScreenctl(opt = {}) {
 
     const server = Hapi.server({
         port,
-        host: '0.0.0.0',
+        host: sec.host,
         routes: {
-            cors: true,
+            cors: sec.cors, // 預設 false（不輸出任何 CORS 標頭）；僅 allowedOrigins 非空時啟用白名單
             payload: { maxBytes: 10 * 1024 * 1024 },
             validate: { failAction: validationFailAction },
         },
     })
+
+    // 預設拒絕：所有已註冊路由皆須 token（免 token 者須顯式標 options.app.public）；
+    // Host／Origin 檢查涵蓋一切請求。Hapi 內建之 notFound 與 CORS 預檢特殊路由不經 onPreAuth（只回 404／CORS 標頭，不執行 handler）
+    server.ext('onRequest', gate.onRequest)
+    server.ext('onPreAuth', gate.onPreAuth)
 
     const validate = (payload) => ({ payload, failAction: validationFailAction })
 
@@ -125,7 +150,8 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/chrome/evaluate',
-        options: { validate: validate(S.schemaChromeEvaluate) },
+        // app.feature='evaluate'：高權限端點（任意 JS 執行），預設關閉，由閘門於驗證 token 後、payload 解析前擋下（403）
+        options: { validate: validate(S.schemaChromeEvaluate), app: { feature: 'evaluate' } },
         handler: chromeRoute('chrome/evaluate', chromeManager, async (inst, p) => {
             // timeout 與 script 錯誤都 throw 出去給 chromeRoute → errResponse 統一分類
             // 包成 IIFE 在頁內 Promise.race，timeout 字樣會被 errClassify 抓成 retry: 'after_1s'
@@ -320,9 +346,11 @@ async function WScreenctl(opt = {}) {
         return healthCache
     }
 
+    // 唯一免 token 之路由（app.public）；仍受 Host／Origin 檢查
     server.route({
         method: 'GET',
         path: '/health',
+        options: { app: { public: true } },
         handler: async () => {
             const memory = await getHealthMemory().catch(() => null)
             return {
@@ -336,7 +364,40 @@ async function WScreenctl(opt = {}) {
     })
 
     await server.start()
+
+    // 自動產生之 token 須在 server 啟動成功（確認 port 無他人占用）後才寫檔，
+    // 否則第二個實例因 port 衝突而啟動失敗時，會把執行中實例所用之 token 檔覆寫掉
+    if (sec.persist) {
+        try {
+            persistToken(sec.tokenFile, sec.token, { replace: sec.persistReplace })
+        }
+        catch (err) {
+            // 沒有人讀得到 token 的伺服器等於無法使用：停掉並拒絕啟動
+            await server.stop({ timeout: 3000 }).catch(() => {})
+            const why = err.code === 'EEXIST'
+                ? 'the file was created by another process while this one was starting (give each instance its own tokenFile, or restart to read it)'
+                : err.message
+            const e = new Error(`refusing to start: cannot write generated token to "${sec.tokenFile}": ${why}. Set option "tokenFile" / env SCREENCTL_TOKEN_FILE to a writable path, or provide a token.`)
+            e.code = 'SCREENCTL_CONFIG'
+            throw e
+        }
+    }
+
+    // token 全文不輸出（log 可能被收集）；只告知來源與 token 檔位置
+    server.app.screenctl = {
+        host: sec.host,
+        port: server.info.port,
+        loopback: sec.loopback,
+        tokenSource: sec.tokenSource,
+        tokenFile: sec.tokenFile,
+        evaluate: sec.evaluate,
+        allowedOrigins: [...sec.allowedOrigins],
+        allowedHosts: [...sec.allowedHosts],
+    }
     console.log(`running at ${server.info.uri} (platform=${process.platform})`)
+    const { info, warn } = describeSecurity(sec)
+    for (const line of info) console.log(line)
+    for (const line of warn) console.warn(line)
 
     // ─── Graceful shutdown ──────────────────────────────────
     //

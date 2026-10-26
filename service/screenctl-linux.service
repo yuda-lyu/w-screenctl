@@ -7,6 +7,21 @@
 #   ExecStart         確認 node 路徑（用 `which node` 查）
 #   Environment=DISPLAY=...   只在有 X server / VNC 時保留；headless 環境刪除
 #   After / Requires=vnc.service   沒有 VNC service 時刪除這兩行
+#   Environment=SCREENCTL_TOKEN_FILE=...   把 YOUR_USERNAME 改成同一個 Linux 使用者
+#
+# ── 安全預設（本服務可遠端操控主機鍵鼠，請勿放寬）─────────────
+#   只綁本機：SCREENCTL_HOST 預設 127.0.0.1，下方明寫以免被環境誤改。
+#     綁其他位址（0.0.0.0、區網 IP）而沒有 token 時，服務會拒絕啟動。
+#   所有端點（/health 除外）須 `Authorization: Bearer <token>`，token 由檔案提供：
+#     SCREENCTL_TOKEN_FILE 指向的檔案存在 → 讀其內容為 token；不存在 → 首次啟動自動產生並寫入（權限 0600）。
+#     建議先建好（固定 token，重啟不變）：
+#       sudo -u YOUR_USERNAME install -d -m 700 /home/YOUR_USERNAME/.config/screenctl
+#       openssl rand -base64 32 | sudo -u YOUR_USERNAME tee /home/YOUR_USERNAME/.config/screenctl/token > /dev/null
+#       sudo chmod 600 /home/YOUR_USERNAME/.config/screenctl/token
+#     呼叫端取用：TOKEN=$(cat /home/YOUR_USERNAME/.config/screenctl/token)
+#   token 也可改用環境變數 Environment=SCREENCTL_TOKEN=...（會出現在 `systemctl show` 輸出，較不建議）。
+#   /chrome/evaluate（任意 JS）預設關閉；需要時加 Environment=SCREENCTL_ENABLE_EVALUATE=1。
+#   其餘設定（SCREENCTL_ALLOWED_ORIGINS 等）見 README「安全預設」。
 #
 # ── 安裝（需 root）─────────────────────────────────────────
 #   sudo cp service/screenctl-linux.service /etc/systemd/system/
@@ -44,6 +59,12 @@ WorkingDirectory=/opt/screenctl
 # headless 環境刪除 DISPLAY；有 X server / VNC 才保留
 Environment=DISPLAY=:99
 Environment=PORT=7000
+
+# 安全預設：只綁本機 + token 由檔案提供（見檔頭「安全預設」；把 YOUR_USERNAME 改掉）
+Environment=SCREENCTL_HOST=127.0.0.1
+Environment=SCREENCTL_TOKEN_FILE=/home/YOUR_USERNAME/.config/screenctl/token
+# 需要 /chrome/evaluate 時才開啟（預設關閉）：
+#Environment=SCREENCTL_ENABLE_EVALUATE=1
 
 # Node.js 執行檔路徑（用 `which node` 查；常見 /usr/bin/node 或 /usr/local/bin/node）
 ExecStart=/usr/bin/node g.mjs
