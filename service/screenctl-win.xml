@@ -29,6 +29,9 @@
       請勿把 token 檔放在 C:\ 根目錄下之共用資料夾（預設 ACL 允許其他使用者讀取），除非自行收緊權限。
       檔案須存為 UTF-8／ASCII（PowerShell 5.1 之 > 會寫出 UTF-16）。
     /chrome/evaluate（任意 JS）預設關閉；需要時 <Arguments> 於 g.mjs 之後加 evaluate 旗標（兩個減號開頭）。
+    操作紀錄預設開啟：每次控制動作與被拒絕之請求記一行 JSON 到「執行此工作之使用者」的 %USERPROFILE%\.w-screenctl\audit-<port>.jsonl
+      （5 MiB 輪替、保留 5 份；不記 token、輸入文字、script 全文）。查看（PowerShell）：Get-Content "$HOME\.w-screenctl\audit-7000.jsonl" -Wait -Tail 20
+    只需操控 Chrome、不需要滑鼠鍵盤與桌面截圖時，<Arguments> 於 g.mjs 之後加 no-system 旗標（兩個減號開頭）關閉系統級端點。
     其餘旗標與完整說明見 README「命令列旗標」「安全預設」。
 
   ── 安裝（管理員 cmd） ──────────────────────────────────────

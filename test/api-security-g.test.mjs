@@ -13,6 +13,7 @@ const fdTest = path.dirname(fileURLToPath(import.meta.url))
 const fdRoot = path.dirname(fdTest)
 const fGm = path.join(fdRoot, 'g.mjs')
 const fdTmp = path.join(fdTest, '_tmp', 'api-security-g')
+const fdHome = path.join(fdTmp, 'home') // 子行程之使用者目錄（HOME／USERPROFILE）指到測試夾，預設 token／紀錄檔不會寫進真實使用者目錄
 
 const EVIL = 'https://evil.example'
 const children = []
@@ -33,7 +34,7 @@ function runG({ name, args = [], env = {} }) {
     const err = fs.openSync(fErr, 'w')
     const child = spawn(process.execPath, [fGm, ...args], {
         cwd: fdRoot,
-        env: cleanEnv(env),
+        env: cleanEnv({ HOME: fdHome, USERPROFILE: fdHome, SCREENCTL_AUDIT_LOG_FILE: path.join(fdTmp, `${name}.audit.jsonl`), ...env }),
         windowsHide: true,
         stdio: ['ignore', out, err],
     })
@@ -74,7 +75,7 @@ async function assertPortFree(port) {
 describe('api-security-g：node g.mjs', function() {
     this.timeout(60000)
 
-    before(() => fs.mkdirSync(fdTmp, { recursive: true }))
+    before(() => fs.mkdirSync(fdHome, { recursive: true }))
 
     after(async () => {
         for (const h of children) {
@@ -220,6 +221,74 @@ describe('api-security-g：node g.mjs', function() {
         await assertPortFree(port)
     })
 
+    it('A05 --no-system 關閉系統級端點（改用不會有副作用之 /screenshot 驗證：403 SYSTEM_DISABLED）、啟動輸出標示 DISABLED、Chrome 頁面級不受影響', async () => {
+        // 注意：此測試對真實子行程送系統級請求；若旗標失效，/screenshot 只會截一張桌面圖（唯讀），不會有鍵鼠動作
+        const port = 8760
+        const tok = 'g12-token-0123456789abcdef-XX'
+        // 環境變數 SCREENCTL_ENABLE_SYSTEM=1 與旗標 --no-system 衝突：旗標（選項）優先，系統級仍關閉
+        const h = runG({ name: 'g12', args: ['--no-system'], env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_ENABLE_SYSTEM: '1' } })
+        await waitUp(port)
+        const r = await rawRequest({ port, method: 'POST', path: '/screenshot', body: {}, headers: { authorization: `Bearer ${tok}` } })
+        assert.equal(r.status, 403)
+        assert.equal(r.json.code, 'SYSTEM_DISABLED')
+        const c = await rawRequest({ port, method: 'POST', path: '/chrome/navigate', body: { url: 'about:blank' }, headers: { authorization: `Bearer ${tok}` } })
+        assert.equal(c.json.code, 'CHROME_NOT_OPEN') // 到達 handler
+        assert.match(h.stdout(), /system\(mouse\/keyboard\/screenshot\)=DISABLED/)
+        await stop(h)
+    })
+
+    it('A05 環境變數 SCREENCTL_ENABLE_SYSTEM=0 關閉系統級（旗標未給）', async () => {
+        const port = 8761
+        const tok = 'g13-token-0123456789abcdef-XX'
+        const h = runG({ name: 'g13', env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_ENABLE_SYSTEM: '0' } })
+        await waitUp(port)
+        const r = await rawRequest({ port, method: 'POST', path: '/screenshot', body: {}, headers: { authorization: `Bearer ${tok}` } })
+        assert.equal(r.json.code, 'SYSTEM_DISABLED')
+        await stop(h)
+    })
+
+    it('A04 --audit-log-file 指定紀錄檔位置（優先於環境變數）；請求被記錄；啟動輸出列出紀錄路徑；紀錄不含 token', async () => {
+        const port = 8762
+        const tok = 'g14-token-0123456789abcdef-XX'
+        const fA = path.join(fdTmp, 'g14-flag.audit.jsonl')
+        const fB = path.join(fdTmp, 'g14-env.audit.jsonl')
+        const h = runG({ name: 'g14', args: ['--audit-log-file', fA], env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_AUDIT_LOG_FILE: fB } })
+        await waitUp(port)
+        assert.equal((await rawRequest({ port, path: '/chrome', headers: { authorization: `Bearer ${tok}` } })).status, 200)
+        assert.equal((await rawRequest({ port, path: '/chrome' })).status, 401)
+        const t0 = Date.now()
+        while (Date.now() - t0 < 4000 && !(fs.existsSync(fA) && fs.readFileSync(fA, 'utf8').split('\n').filter(Boolean).length >= 2)) await new Promise((resolve) => setTimeout(resolve, 50))
+        const lines = fs.readFileSync(fA, 'utf8').split('\n').filter(Boolean).map((x) => JSON.parse(x))
+        assert.deepEqual(lines.map((x) => [x.method, x.path, x.status, x.denied]), [['GET', '/chrome', 200, undefined], ['GET', '/chrome', 401, 'UNAUTHORIZED']])
+        assert.equal(fs.existsSync(fB), false, '環境變數指定之紀錄檔不應被碰')
+        assert.ok(!fs.readFileSync(fA, 'utf8').includes(tok))
+        assert.ok(h.stdout().includes(fA), h.stdout())
+        await stop(h)
+    })
+
+    it('A05 --no-audit-log 關閉操作紀錄：不建立紀錄檔、啟動輸出標示 OFF 並警告', async () => {
+        const port = 8763
+        const tok = 'g15-token-0123456789abcdef-XX'
+        const f = path.join(fdTmp, 'g15.audit.jsonl')
+        // 環境變數 SCREENCTL_AUDIT_LOG=1 與旗標 --no-audit-log 衝突：旗標（選項）優先，仍不寫紀錄
+        const h = runG({ name: 'g15', args: ['--no-audit-log'], env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_AUDIT_LOG: '1', SCREENCTL_AUDIT_LOG_FILE: f } })
+        await waitUp(port)
+        assert.equal((await rawRequest({ port, path: '/chrome', headers: { authorization: `Bearer ${tok}` } })).status, 200)
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        assert.equal(fs.existsSync(f), false)
+        assert.match(h.stdout(), /audit-log=OFF/)
+        assert.match(h.stderr() + h.stdout(), /audit log is OFF/i)
+        await stop(h)
+    })
+
+    it('A05 紀錄設定值不合規格 → 退出碼 1、拒絕啟動（不默默退回預設）', async () => {
+        const port = 8764
+        const h = runG({ name: 'g16', env: { PORT: String(port), SCREENCTL_TOKEN: 'g16-token-0123456789abcdef-XX', SCREENCTL_AUDIT_LOG_MAX_BYTES: 'many' } })
+        assert.equal((await h.exited).code, 1)
+        assert.match(h.stderr(), /refusing to start/)
+        await assertPortFree(port)
+    })
+
     it('旗標錯誤 → 退出碼 2 並印出用法；--help → 退出碼 0', async () => {
         const bad = runG({ name: 'g7', args: ['--bogus'] })
         assert.equal((await bad.exited).code, 2)
@@ -227,6 +296,7 @@ describe('api-security-g：node g.mjs', function() {
         const help = runG({ name: 'g8', args: ['--help'] })
         assert.equal((await help.exited).code, 0)
         assert.match(help.stdout(), /--evaluate/)
+        for (const flag of ['--no-system', '--no-audit-log', '--audit-log-file']) assert.ok(help.stdout().includes(flag), `--help 應列出 ${flag}`)
         assert.ok(!/--token\b/.test(help.stdout().replace(/--token-file/g, '')), '不提供 --token 旗標（避免出現在行程列表）')
     })
 })

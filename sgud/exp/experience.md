@@ -21,4 +21,19 @@
 - **外審的效益**:sol(gpt-6.1-sol/max)約 22 分鐘找到 16 條,屬實 15(1 條範圍外既有行為);其中最有價值的是「測試只用 Joi 400 證明系統級端點通過閘門」(→ 加 `opt.backend` 替身,有 token+合法 payload 才證明維持開啟)與「OPTIONS 例外使預設拒絕可被未來路由破壞」(→ 移除).提示詞用「功能正確性審查」措辭未被擋.
 - **Edit 工具會把字串內的 ` ` 轉成字面 NBSP**:eslint `no-irregular-whitespace` 會報;改用寫檔腳本把字面字元換回轉義文字,或用 `String.fromCharCode`.
 - **變異測試執行器必須隔離家目錄**:被變異的程式(例如預設 host 改回 `0.0.0.0`、拿掉非迴路檢查)會正常啟動並把自動產生的 token 寫到真實的 `~/.w-screenctl/`(2026-10-26 實際發生,留下 6 個孤兒 token 檔,事後清除並回驗).跑變異時對子行程設 `HOME`、`USERPROFILE` 指到暫存夾.另外這些變異會真的綁 `0.0.0.0` 的測試 port(防火牆對話框風險),只在確有必要的變異才跑.
+## 操作紀錄與系統級開關(2026-10-26 screenctl-run02)
+
+- **寫紀錄用 Hapi `response` 事件,不用 `onPreResponse`**:被 `onRequest` 接管(Origin／Host 拒絕)與 notFound／預檢特殊路由的請求,路由層擴充點(`onPreAuth`、`onPreResponse`)不會執行(server.ext 於建立後才註冊,不重建特殊路由的生命週期),只有 `server.events.on('response')` 對所有請求都觸發.拒絕原因由閘門寫在 `request.app.denied`,事件處理函式讀它.
+- **參數摘要在 `onPreHandler` 取**(驗證之後):驗證失敗(400)的請求不會走到,因此不會把格式錯誤的 payload 記進去;被閘門攔下的請求也沒有摘要.
+- **回應送出後才寫檔**:客戶端先收到回應、紀錄稍後才落檔,測試要輪詢紀錄檔等行數,不可固定 sleep;「不應有紀錄」的斷言則要先等一小段(300ms)再數.
+- **單一字元鍵(逐鍵輸入密碼)的處理**:`/keyboard/key` 若逐字送密碼,鍵名本身就是密碼;規則:具名鍵與含 ctrl／alt／super／meta 的快捷鍵原樣記,其餘單一可印字元記 `<char>`.
+- **紀錄寫入器的邊界**:延遲到首次寫入才建立目錄(建立 logger 與 bootRoutes 類測試不留檔);ENOENT 重建目錄重試一次;**每次寫入前都 `stat` 實際檔案大小,不快取**(外審 #7:快取在部分寫入失敗、兩個 logger 共檔、外部截斷時都會失準,實測 100 次部分寫入長到 11690 bytes);輪替失敗時丟棄而非繼續 append(有界優先於完整);單筆超大不拆行;`append` 部分成功後失敗要記 `dirty`,下一筆以 `\n` 開頭,否則連下一筆成功的紀錄也無法解析.連續失敗只警告一次,恢復後才再警告.
+- **輪替要可還原**:先把目前檔改名到 `.rotating`(此步最常因檔案被占用而失敗,此時其他備份都還沒動),再 `.keep-1`→`.keep`、`.rotating`→`.1`;中途失敗把 `.rotating` 改回目前檔.反覆失敗不會吃掉歷史(外審 #11).
+- **紀錄入檔前的清除要涵蓋所有載體,不只 body 與 Authorization**:拒絕事件發生在路由與驗證之前,Origin／Host／path 是未受信任字串,可帶帳密、query、甚至目前 token(例如把 token 誤放進 URL 路徑);因此 Origin／Host 僅在語法合法時記、path 對未註冊者遮蔽長片段、寫入器最後對現行 token 全文(原文與 JSON 跳脫兩種形式)清除.`about://user:pw@…` 也屬帳密載體,`stripUrl` 對所有協定一視同仁(外審 #1、#2).
+- **開關型別要從嚴**:`0`／`[]`／`{}` 被當成「未給」會讓環境變數已關閉的功能被選項重開(外審 #3).安全相關開關只認布林、`0`／`1`、已知字串,其餘 `SCREENCTL_CONFIG` 拒絕啟動.
+- **客戶端斷線後 `request.info.remoteAddress` 為空**(2026-10-26 以 `probe-abort.mjs` 實測):來源 IP 要在請求一開始(閘門之前)的 `onRequest` 先存進 `request.app.auditIp`.
+- **用「位元組 vs 字元數」之類兩種估算做測試夾具,必須斷言夾具前提**(N40 首輪存活的教訓):夾具若讓兩種估算恰在同一點輪替,等於沒測.寫法:先算出兩種估算值並 assert 它們在目標點分歧,再**每寫一筆就檢查**(只看最後狀態,超限的檔案之後會被輪替掉而掩蓋).
+- **測試／變異不得寫真實使用者目錄**:新增「預設寫入家目錄」的功能後,凡會啟動伺服器的測試都要同時 (a) 帶 `auditLogFile` 導向 `test/_tmp` 或 `auditLog:false`,(b) 把 HOME／USERPROFILE 指到測試夾(api 測試用 `apiHarness.useFakeHome`,g 子行程用 env,變異執行器對子行程設 env).並在每輪結束核對 `~/.w-screenctl` 不存在.
+- **覆寫 USERPROFILE 會讓 Playwright 啟動 Chrome 逾時**(`launchPersistentContext timeout 20000ms`,2026-10-26 實測):會啟動真 Chrome 的場景(L5 驗收)不要覆寫 HOME／USERPROFILE,改以 `SCREENCTL_TOKEN_FILE`、`SCREENCTL_AUDIT_LOG_FILE` 明指到 `tmp`;不啟動 Chrome 的測試／變異才覆寫.兩種做法都要在結束時核對 `~/.w-screenctl` 不存在.
+- **系統級端點的測試安全**:變異可能拿掉 `SYSTEM_DISABLED` 判斷,故任何會對「真實 g 子行程」送系統級請求的測試只用 `/screenshot`(唯讀);鍵鼠請求一律走 `opt.backend` 替身;Chrome 請求走 `opt.chromeManager` 替身(含 `/chrome/open`,避免啟動真 Chrome).
 - **MaxListenersExceededWarning**:`WScreenctl` 每個實例對 `process` 掛 SIGTERM/SIGINT `once` 監聽且 `stop()` 不移除(既有行為,未改);同一行程起超過 10 個實例的測試需 `process.setMaxListeners`.

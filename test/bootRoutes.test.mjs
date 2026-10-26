@@ -22,7 +22,8 @@ describe('boot smoke：路由註冊', function() {
 
     before(async () => {
         // 預設安全後必須有 token；明給 token 則不會寫出 token 檔（不污染使用者家目錄）
-        server = await WScreenctl({ port: 7099, token: 'boot-routes-test-token-0123456789' })
+        // auditLog:false：本測試只看路由表，不產生任何操作紀錄檔（預設紀錄檔位於使用者目錄）
+        server = await WScreenctl({ port: 7099, token: 'boot-routes-test-token-0123456789', auditLog: false })
         actual = server.table().map((r) => `${r.method.toUpperCase()} ${r.path}`)
     })
 

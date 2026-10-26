@@ -57,6 +57,16 @@ sudo dnf install xdotool ImageMagick
 5. 程式內呼叫（`WScreenctl({...})`）未給 `token` 時，會自動產生並寫入 `~/.w-screenctl/token-<port>`；測試或 CI 請明給 `token`（不會寫檔）。
 6. 自動啟動設定（`service/`）已改為本機綁定，token 由環境變數或檔案提供，見[自動啟動 / 部署](#自動啟動--部署)。
 
+### 新增操作紀錄與系統級開關（向下相容；操作紀錄預設開啟）
+
+| 項目 | 行為 | 如何調整 |
+|---|---|---|
+| 操作紀錄 | 每次控制動作與每次被拒絕之請求各記一行 JSON，寫入 `~/.w-screenctl/audit-<port>.jsonl`（首次寫入才建立）；不記 token、輸入文字、script 全文，詳見[操作紀錄](#操作紀錄audit-log) | `auditLog: false`／`SCREENCTL_AUDIT_LOG=0`／`--no-audit-log` 關閉；`auditLogFile` 改位置 |
+| 系統級端點可關閉 | 預設仍開啟（與先前一致）；只需操控 Chrome 時可整批關閉 `/screenshot`、`/mouse/*`、`/keyboard/*`，改回 403 `SYSTEM_DISABLED` 並記錄 | `enableSystem: false`／`SCREENCTL_ENABLE_SYSTEM=0`／`--no-system` |
+| 啟動輸出 | 多一行 `[security] capabilities: …`，列出目前啟用之能力（系統級、evaluate、操作紀錄路徑） | — |
+
+升級注意：預設會在使用者目錄新增紀錄檔（單檔上限 5 MiB、輪替保留 5 份，總量約 30 MiB）；測試或 CI 請以 `auditLogFile` 導向暫存夾，或 `auditLog: false`。
+
 ## API 控制說明
 
 w-screenctl 啟動後對外提供 REST API，讓外部程式 / AI agent 透過 HTTP 控制：
@@ -74,16 +84,18 @@ node g.mjs
 # running at http://127.0.0.1:7000 (platform=...)
 # [security] bind=127.0.0.1 (loopback only) | auth=Bearer token (generated) | evaluate=disabled | cors=off
 # [security] token file: /home/you/.w-screenctl/token-7000     ← token 自動產生並寫在此檔（不會印出 token 全文）
+# [security] capabilities: chrome=on | system(mouse/keyboard/screenshot)=on | evaluate=off | audit-log=/home/you/.w-screenctl/audit-7000.jsonl (max 5242880 bytes x 5 rotated)
 
 TOKEN=$(cat ~/.w-screenctl/token-7000)
 curl http://127.0.0.1:7000/health                                          # 免 token
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7000/chrome        # 其餘都要 token
 
 node g.mjs --evaluate           # 需要 /chrome/evaluate 時顯式開啟（等同 SCREENCTL_ENABLE_EVALUATE=1）
-PORT=8000 node g.mjs            # 改 port（token 檔隨之改為 ~/.w-screenctl/token-8000）
+node g.mjs --no-system          # 只操控 Chrome 時，關閉系統級滑鼠鍵盤與桌面截圖（等同 SCREENCTL_ENABLE_SYSTEM=0）
+PORT=8000 node g.mjs            # 改 port（token 檔、操作紀錄隨之改為 …-8000）
 ```
 
-以 npm 安裝者，啟動腳本在套件內：`node node_modules/w-screenctl/g.mjs`。要在背景啟動並把 token 檔放在專案暫存夾（不碰家目錄）：`SCREENCTL_TOKEN_FILE=./tmp/screenctl.token nohup node node_modules/w-screenctl/g.mjs > ./tmp/screenctl.log 2>&1 &`，之後 `TOKEN=$(cat ./tmp/screenctl.token)`。
+以 npm 安裝者，啟動腳本在套件內：`node node_modules/w-screenctl/g.mjs`。要在背景啟動並把 token 檔放在專案暫存夾（不碰家目錄）：`SCREENCTL_TOKEN_FILE=./tmp/screenctl.token SCREENCTL_AUDIT_LOG_FILE=./tmp/screenctl-audit.jsonl nohup node node_modules/w-screenctl/g.mjs > ./tmp/screenctl.log 2>&1 &`，之後 `TOKEN=$(cat ./tmp/screenctl.token)`（token 檔與操作紀錄都在專案暫存夾，清掉 `tmp/` 即一併清除）。
 
 Windows PowerShell 取 token：`$TOKEN = (Get-Content "$HOME\.w-screenctl\token-7000").Trim()`；用 `curl.exe`（不是 `curl` 別名）呼叫。自行指定 token 亦可：`SCREENCTL_TOKEN=<16 字元以上之隨機字串> node g.mjs`。
 
@@ -108,6 +120,9 @@ const server = await WScreenctl({ port: 7000, token: process.env.MY_TOKEN })
 | `--evaluate` | `enableEvaluate` | 開啟 `POST /chrome/evaluate` |
 | `--allow-origin <origin>` | `allowedOrigins` | 放行跨站 Origin，可重複 |
 | `--allow-host <name>` | `allowedHosts` | 額外接受之 Host 名稱，可重複 |
+| `--no-system` | `enableSystem: false` | 關閉系統級端點（`/screenshot`、`/mouse/*`、`/keyboard/*`），改回 403 `SYSTEM_DISABLED` 並記錄 |
+| `--no-audit-log` | `auditLog: false` | 不寫操作紀錄（啟動時印警告） |
+| `--audit-log-file <path>` | `auditLogFile` | 操作紀錄檔位置 |
 | `-h`、`--help` | | 顯示用法 |
 
 開機自動啟動見 [自動啟動 / 部署](#自動啟動--部署)。
@@ -122,6 +137,13 @@ const server = await WScreenctl({ port: 7000, token: process.env.MY_TOKEN })
 | Bearer token | `token` | `SCREENCTL_TOKEN` | 自動產生（僅迴路位址） | 選項 > 環境變數 > token 檔 > 自動產生 |
 | token 檔 | `tokenFile` | `SCREENCTL_TOKEN_FILE` | `~/.w-screenctl/token-<port>` | 選項 > 環境變數 |
 | 開啟 `/chrome/evaluate` | `enableEvaluate` | `SCREENCTL_ENABLE_EVALUATE`（`1`/`true`/`yes`/`on`） | 關 | 選項 > 環境變數 |
+| 系統級端點（滑鼠、鍵盤、桌面截圖） | `enableSystem` | `SCREENCTL_ENABLE_SYSTEM`（`0`/`false`/`no`/`off` 關閉） | 開 | 選項 > 環境變數 |
+| 操作紀錄 | `auditLog` | `SCREENCTL_AUDIT_LOG`（`0`/`false`/`no`/`off` 關閉） | 開 | 選項 > 環境變數 |
+| 操作紀錄檔 | `auditLogFile` | `SCREENCTL_AUDIT_LOG_FILE` | `~/.w-screenctl/audit-<port>.jsonl` | 選項 > 環境變數 |
+| 單檔上限（位元組） | `auditLogMaxBytes` | `SCREENCTL_AUDIT_LOG_MAX_BYTES` | `5242880`（5 MiB；範圍 1024～1073741824） | 選項 > 環境變數 |
+| 輪替保留份數 | `auditLogKeep` | `SCREENCTL_AUDIT_LOG_KEEP` | `5`（範圍 0～100） | 選項 > 環境變數 |
+
+> 開關類設定（`enableEvaluate`、`enableSystem`、`auditLog`）只接受布林、`0`／`1`，或 `1/true/yes/on`、`0/false/no/off` 字串；其他型別或值（如 `2`、`[]`、`"maybe"`）**拒絕啟動**，不會被默默當成預設值。選項為 `undefined`／`null`／空白字串時視為「未給」，改看環境變數、再看預設。`auditLogFile` 給非字串同樣拒絕啟動。
 | 跨站 Origin 白名單 | `allowedOrigins`（陣列或逗號字串） | `SCREENCTL_ALLOWED_ORIGINS` | 空（全拒） | 選項 > 環境變數 |
 | 額外 Host 名稱 | `allowedHosts`（陣列或逗號字串） | `SCREENCTL_ALLOWED_HOSTS` | 空 | 選項 > 環境變數 |
 
@@ -132,8 +154,9 @@ const server = await WScreenctl({ port: 7000, token: process.env.MY_TOKEN })
 | 監聽 | 只綁 `127.0.0.1`。綁其他位址（`0.0.0.0`、區網 IP…）而**沒有 token** → 拒絕啟動並印出原因；有 token 仍會印出警告（token 以明文走 HTTP） |
 | 認證 | 除 `GET /health` 外一律 `Authorization: Bearer <token>`，以定時比較（`crypto.timingSafeEqual`）驗證；缺、錯皆 `401`。**沒有任何值或旗標可停用驗證**（`token: false`、空字串都視為「未給」） |
 | 跨站 | 不輸出任何 CORS 標頭；請求帶 `Origin`（瀏覽器跨站請求與預檢）預設 `403`；`Host` 標頭須為 `localhost`／`127.0.0.1`／`[::1]`（擋 DNS rebinding），否則 `403`。`/health` 亦受這兩項檢查。標頭解析從嚴：重複的 `Host`／`Authorization` 標頭、以 NBSP 等非 HTTP 空白包夾的值一律拒絕 |
-| 高權限端點 | `POST /chrome/evaluate`（任意 JS）預設 `403 EVALUATE_DISABLED`，須顯式開啟。系統級 `/keyboard/*`、`/mouse/*`、`/screenshot` 為本套件主要用途，維持開啟，但受 token 保護 |
-| log | 不印 token 全文，只印來源與 token 檔路徑 |
+| 高權限端點 | `POST /chrome/evaluate`（任意 JS）預設 `403 EVALUATE_DISABLED`，須顯式開啟。系統級 `/keyboard/*`、`/mouse/*`、`/screenshot` 為本套件主要用途，預設開啟，但受 token 保護；只需操控 Chrome 時可用 `enableSystem: false`／`--no-system` 整批關閉（`403 SYSTEM_DISABLED`） |
+| 操作紀錄 | 預設開啟：每次控制動作與每次被拒絕之請求各記一行（時間、端點、來源 IP、狀態碼、耗時、不含機敏內容之參數摘要）；token、輸入文字、script 全文一律不記，詳見[操作紀錄](#操作紀錄audit-log) |
+| log | 不印 token 全文，只印來源與 token 檔路徑；啟動時印出目前啟用之能力 |
 
 **為什麼只綁本機仍要 token**：不設認證時，使用者瀏覽的任何網頁都能對 `http://127.0.0.1:7000` 送請求（跨站偽造），DNS rebinding 亦可繞過同源限制；token 是唯一不靠瀏覽器行為的防線，`Host`／`Origin` 檢查則是縱深防禦。
 
@@ -154,8 +177,65 @@ const server = await WScreenctl({ port: 7000, token: process.env.MY_TOKEN })
 | 403 | `FORBIDDEN_HOST` | `Host` 標頭不在白名單 |
 | 403 | `FORBIDDEN_ORIGIN` | 請求帶 `Origin` 且不在 `allowedOrigins` |
 | 403 | `EVALUATE_DISABLED` | 呼叫 `/chrome/evaluate` 但未開啟（需先通過 token 驗證） |
+| 403 | `SYSTEM_DISABLED` | 呼叫系統級端點（`/screenshot`、`/mouse/*`、`/keyboard/*`）但已以 `enableSystem: false` 關閉（需先通過 token 驗證） |
 
 **綁非迴路位址（不建議）**：token 以明文走 HTTP，且 `Host` 不檢查（除非設 `allowedHosts`）。請改用 SSH 通道或 TLS 反向代理，並以防火牆限制來源。能呼叫者等同取得主機之鍵鼠與 Chrome 控制權（含 `file://` 讀取與有頭 Chrome 之任意操作），請視 token 為主機密碼。
+
+### 操作紀錄（audit log）
+
+預設開啟。每次經 HTTP 的**控制動作**（系統級 `/screenshot`、`/mouse/*`、`/keyboard/*`，與 `/chrome/*` 含 open／navigate／evaluate／screenshot／頁面級滑鼠鍵盤／`GET /chrome`／`DELETE /chrome`）與每次**被拒絕的請求**（401／403：缺或錯 token、`Origin`／`Host` 被擋、evaluate 未開、系統級已關閉）各記一行 JSON（JSONL）。**不記**：公開的 `GET /health` 成功、未註冊路徑的 404、預檢成功。
+
+```jsonl
+{"ts":"2026-10-26T06:30:01.123Z","method":"POST","path":"/mouse/click","ip":"127.0.0.1","status":200,"ms":14,"ok":true,"params":{"x":960,"y":540,"button":1}}
+{"ts":"2026-10-26T06:30:02.456Z","method":"POST","path":"/keyboard/type","ip":"127.0.0.1","status":200,"ms":22,"ok":true,"params":{"textLen":12}}
+{"ts":"2026-10-26T06:30:03.789Z","method":"POST","path":"/chrome/evaluate","ip":"127.0.0.1","status":200,"ms":9,"ok":true,"params":{"scriptLen":14,"scriptSha256":"…64 hex…"}}
+{"ts":"2026-10-26T06:30:05.000Z","method":"POST","path":"/chrome/navigate","ip":"127.0.0.1","status":200,"ms":310,"ok":true,"params":{"url":"https://example.com/path"}}
+{"ts":"2026-10-26T06:30:09.000Z","method":"GET","path":"/chrome","ip":"192.168.1.8","status":401,"ms":1,"ok":false,"code":"UNAUTHORIZED","denied":"UNAUTHORIZED"}
+{"ts":"2026-10-26T06:30:11.000Z","method":"POST","path":"/chrome/open","ip":"127.0.0.1","status":403,"ms":1,"ok":false,"code":"FORBIDDEN_ORIGIN","denied":"FORBIDDEN_ORIGIN","origin":"https://evil.example"}
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `ts` | 請求到達時間（ISO 8601，UTC） |
+| `method`／`path` | HTTP 方法與路徑（不含查詢字串；超長截斷 200 字元） |
+| `ip` | 連線的來源位址（請求一開始即取下之 socket 位址，客戶端中途斷線仍有；**不採信** `X-Forwarded-For` 等可偽造標頭；IPv4-mapped 位址正規化為 IPv4） |
+| `status`／`ms` | HTTP 狀態碼與處理耗時（毫秒）；客戶端中途斷線時動作照常完成並照記（`status` 為伺服器端產生之回應碼） |
+| `ok`／`code` | 回應本體的 `ok`（本體沒有 `ok` 者，如 `GET /chrome` 的狀態快照，以 HTTP 狀態推導）與穩定代碼（如 `CHROME_NOT_OPEN`、`VALIDATION`；只收全大寫底線格式）；HTTP 200 而 `ok:false` 代表動作被受理但失敗。不記錯誤訊息全文 |
+| `denied` | 僅被閘門拒絕時出現：`UNAUTHORIZED`、`FORBIDDEN_HOST`、`FORBIDDEN_ORIGIN`、`EVALUATE_DISABLED`、`SYSTEM_DISABLED` |
+| `origin`／`host` | 僅 `FORBIDDEN_ORIGIN`／`FORBIDDEN_HOST` 時附上，便於追查：只記通過語法檢查之值（`origin` 只留 `scheme://host[:port]`，去除帳密、路徑、查詢字串；`host` 為 `host[:port]`），其餘記 `<invalid>` |
+| `params` | 參數摘要（下表）；被拒絕、或驗證失敗（400）的請求不附 |
+
+**參數摘要只含不敏感的欄位**（由白名單複製，不展開 payload）：
+
+| 端點 | `params` |
+|---|---|
+| `/mouse/click`、`/chrome/mouse/click` | `x`、`y`、`button` |
+| `/mouse/dblclick`、`/chrome/mouse/dblclick` | `x`、`y` |
+| `/mouse/drag`、`/chrome/mouse/drag` | `fromX`、`fromY`、`toX`、`toY`、`button` |
+| `/mouse/scroll`、`/chrome/mouse/scroll` | `x`、`y`、`direction`、`amount` |
+| `/keyboard/key`、`/chrome/keyboard/key` | `keys`：已知的具名鍵與快捷鍵（`Enter`、`F5`、`ctrl+a`）原樣記；**單一可印字元**（以字素計，單一 emoji 也算一個；Playwright 的 `KeyA`／`Digit5`、xdotool 的 `minus` 亦同；可能是逐鍵輸入的密碼）只記 `<char>`（`shift+7` → `shift+<char>`）；**不是已知鍵名**的其他字串只記 `<key>` |
+| `/keyboard/type`、`/chrome/keyboard/type` | **只記 `textLen`（字元數）**，絕不記文字 |
+| `/chrome/evaluate` | **只記 `scriptLen` 與 `scriptSha256`**（UTF-8 的 SHA-256），不記 script |
+| `/chrome/open` | `url`（去除查詢字串、片段、帳密）、`mode`、`window`、`viewport`、`userData`（只記 `true`＝有指定自訂 profile，不記路徑）、`opt`（`headless`、`disableGpu`、`disableSandbox`、`deviceScaleFactor`） |
+| `/chrome/navigate` | `url`（同上） |
+| `/screenshot` | `region`（若有） |
+| 其餘（`GET /chrome`、`DELETE /chrome`、`/chrome/screenshot`） | 無 |
+
+**一律不記**：token 與 `Authorization` 標頭、請求本體、輸入文字、script 全文、網址的查詢字串／片段／帳密（任何協定，含 `about://user:pw@…`）、`userData` 路徑、回應內容（例如截圖）。新增路由而未登錄摘要時，預設不記任何參數。
+
+**額外的防線**：寫檔前會自整行清除「目前的 token 全文」（含 JSON 跳脫形式，記為 `<redacted>`），不論它經由哪個載體進到紀錄項（例如被誤放進路徑）。已註冊路由記路由樣板；**未註冊路徑**的路徑文字是呼叫端可控字串，超過 24 字元的片段記為 `<long>`，整體截斷 200 字元。
+
+**位置、權限、大小**
+
+- 預設 `~/.w-screenctl/audit-<port>.jsonl`（與 token 檔同目錄；綁定位址不是預設的 `127.0.0.1` 時為 `audit-<位址>-<port>.jsonl`）；以 `auditLogFile`／`SCREENCTL_AUDIT_LOG_FILE`／`--audit-log-file` 改位置。檔案於首次寫入時才建立；POSIX 檔案 `0600`、新建目錄 `0700`；Windows 依資料夾 ACL（使用者家目錄預設僅本人與系統管理者可讀）。
+- 單檔上限預設 5 MiB（`auditLogMaxBytes`），超過即輪替：`audit-7000.jsonl` → `audit-7000.jsonl.1` → … → `audit-7000.jsonl.5`，最舊者刪除；預設保留 5 份（`auditLogKeep`，0 表示不留舊檔）。總量上限約 `(keep + 1) × maxBytes`（預設約 30 MiB）。一行不會被拆到兩個檔；單筆即超過上限者仍完整寫入。每次寫入前都重新取得實際檔案大小（重啟、外部截斷、部分寫入失敗都不會讓上限失準）。輪替時先把目前檔改名（此步失敗，例如檔案被其他程式占用，其餘備份原封不動，之後可重試），中途失敗會還原目前檔。調降 `auditLogKeep` 後，超出的舊輪替檔於首次寫入時刪除；調降 `auditLogMaxBytes` 後，既有較大的舊檔不會被截斷（避免毀損稽核資料），隨輪替自然汰換。POSIX 下既有的紀錄檔若權限寬於 `0600`，首次寫入後會收緊為 `0600`（既有目錄的權限不改）。
+- 同步寫入（一筆一行，並行請求不會交錯）。**一個紀錄檔請只給一個實例寫入**（預設檔名含 port 即為此）。
+
+**寫檔失敗不影響請求**：紀錄檔無法寫入（磁碟滿、路徑不可寫、輪替被拒…）時，控制動作與回應照常，console 只警告一次（`[audit] cannot write audit log …`），寫入恢復成功後才會再次警告；輪替失敗時為維持檔案大小有界，會丟棄新紀錄。寫入只成功一半（例如磁碟剛好滿）而留下殘行時，下一筆前會先換行，殘行不會黏到下一筆（下一筆仍可獨立解析）。
+
+**關閉**：`auditLog: false`／`SCREENCTL_AUDIT_LOG=0`／`--no-audit-log`；關閉時啟動輸出會印警告。只想限縮能力而非關紀錄，用 `enableSystem: false`／`--no-system`。
+
+**隱私與使用提醒**：紀錄檔含端點、來源 IP、座標、不含查詢字串的網址等操作軌跡，屬使用者本機資料；請勿納入版控或對外分享。它是營運稽核用的紀錄，**不是防竄改紀錄**（能寫該目錄者可改檔）。查看：`tail -f ~/.w-screenctl/audit-7000.jsonl`；PowerShell：`Get-Content "$HOME\.w-screenctl\audit-7000.jsonl" -Wait -Tail 20`；只看被拒絕的：`grep '"denied"' ~/.w-screenctl/audit-7000.jsonl`。
 
 ### 通用約定
 
@@ -199,6 +279,7 @@ AUTH="Authorization: Bearer $(cat ~/.w-screenctl/token-7000)"
 | `FORBIDDEN_HOST` | `Host` 標頭不在白名單，疑似 DNS rebinding（HTTP 403） |
 | `FORBIDDEN_ORIGIN` | 請求帶 `Origin` 且不在 `allowedOrigins`，即跨站請求（HTTP 403） |
 | `EVALUATE_DISABLED` | `/chrome/evaluate` 未開啟（HTTP 403） |
+| `SYSTEM_DISABLED` | 系統級端點已關閉（HTTP 403） |
 | `VALIDATION` | Joi schema 拒絕 payload（HTTP 400） |
 | `CHROME_NOT_OPEN` | chrome 不是 open（含 caller 操作期間 chromium 死亡） |
 | `TIMEOUT` | 任何 timeout 字樣（launch / goto / evaluate / close） |
@@ -504,6 +585,8 @@ Body：
 ### 3. 系統級控制
 
 > 影響整個桌面，會與其他程式互動。座標基於整個螢幕的左上角。
+>
+> 本節 7 條端點（`/screenshot`、`/mouse/*`、`/keyboard/*`）可整批關閉：`enableSystem: false`／`SCREENCTL_ENABLE_SYSTEM=0`／`node g.mjs --no-system`，關閉後回 `403 { "ok": false, "code": "SYSTEM_DISABLED" }`（須先通過 token 驗證）並記入[操作紀錄](#操作紀錄audit-log)；`/chrome/*`（含頁面級滑鼠鍵盤）不受影響。每次呼叫（含被拒絕者）都會留下操作紀錄，`/keyboard/type` 只記文字長度。
 
 #### 3.1 系統截圖
 

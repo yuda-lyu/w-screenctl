@@ -21,6 +21,9 @@
 #     呼叫端取用：TOKEN=$(cat /home/YOUR_USERNAME/.config/screenctl/token)
 #   token 也可改用環境變數 Environment=SCREENCTL_TOKEN=...（會出現在 `systemctl show` 輸出，較不建議）。
 #   /chrome/evaluate（任意 JS）預設關閉；需要時加 Environment=SCREENCTL_ENABLE_EVALUATE=1。
+#   操作紀錄預設開啟：每次控制動作與被拒絕之請求記一行 JSON 到該使用者的 ~/.w-screenctl/audit-<port>.jsonl（5 MiB 輪替、保留 5 份；
+#     不記 token、輸入文字、script 全文）。要改位置：Environment=SCREENCTL_AUDIT_LOG_FILE=/var/log/screenctl/audit.jsonl（目錄須預先建立並歸該使用者）。
+#   只需操控 Chrome、不需要滑鼠鍵盤與桌面截圖時，加 Environment=SCREENCTL_ENABLE_SYSTEM=0 關閉系統級端點（改回 403 SYSTEM_DISABLED）。
 #   其餘設定（SCREENCTL_ALLOWED_ORIGINS 等）見 README「安全預設」。
 #
 # ── 安裝（需 root）─────────────────────────────────────────
@@ -65,6 +68,10 @@ Environment=SCREENCTL_HOST=127.0.0.1
 Environment=SCREENCTL_TOKEN_FILE=/home/YOUR_USERNAME/.config/screenctl/token
 # 需要 /chrome/evaluate 時才開啟（預設關閉）：
 #Environment=SCREENCTL_ENABLE_EVALUATE=1
+# 只操控 Chrome 時關閉系統級滑鼠鍵盤與桌面截圖（預設開啟）：
+#Environment=SCREENCTL_ENABLE_SYSTEM=0
+# 操作紀錄位置（預設 ~/.w-screenctl/audit-<port>.jsonl）：
+#Environment=SCREENCTL_AUDIT_LOG_FILE=/var/log/screenctl/audit.jsonl
 
 # Node.js 執行檔路徑（用 `which node` 查；常見 /usr/bin/node 或 /usr/local/bin/node）
 ExecStart=/usr/bin/node g.mjs

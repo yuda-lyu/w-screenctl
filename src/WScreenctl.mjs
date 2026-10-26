@@ -10,6 +10,11 @@ import ChromeManager from './chromeManager.mjs'
 import { systemRoute, chromeRoute, lifecycleRoute, errResponse } from './routeFactory.mjs'
 import * as S from './schemas.mjs'
 import { resolveSecurity, createGate, describeSecurity, persistToken } from './security.mjs'
+import { createAuditLogger, summarizeParams } from './auditLog.mjs'
+
+
+// 系統級路由（滑鼠、鍵盤、桌面截圖）之標記：可由 enableSystem=false 整批關閉（閘門回 403 SYSTEM_DISABLED）
+const SYSTEM_APP = { feature: 'system' }
 
 
 /**
@@ -30,6 +35,11 @@ import { resolveSecurity, createGate, describeSecurity, persistToken } from './s
  * - `/chrome/evaluate` 預設關閉（403），須 `enableEvaluate` 顯式開啟
  * 新增之安全選項優先序皆為：選項 > 環境變數 > 預設（`port`、`fdUserData` 維持既有之環境變數優先）
  *
+ * 操作紀錄（預設開啟）：每次控制動作（系統級 /keyboard、/mouse、/screenshot，與 /chrome/*）與每次被閘門拒絕之請求（401／403）各記一行 JSON 到紀錄檔。
+ * 內容：時間（ISO）、方法、路徑、來源 IP、狀態碼、耗時、結果（ok／code）、不含機敏內容之參數摘要（座標、鍵名可記；/keyboard/type 與 /chrome/keyboard/type 只記文字長度；
+ * /chrome/evaluate 只記 script 長度與 SHA-256；網址去除查詢字串；單一可印字元之按鍵不記字面）；拒絕事件記拒絕原因（denied）。**token、請求本體一律不記**。
+ * 紀錄檔超過上限即輪替；寫檔失敗不影響請求（console 警告一次）。可關閉系統級端點（`enableSystem: false`）供只需操控 Chrome 之情境。
+ *
  * @param {Object} [opt={}] 輸入設定物件
  * @param {Integer} [opt.port=7000] 服務監聽 port，優先序：env PORT > opt.port > 7000
  * @param {String} [opt.fdUserData] Chrome user data 資料夾路徑，優先序：env CHROME_USER_DATA > opt.fdUserData > 當前工作路徑下的 ./user_data
@@ -37,8 +47,14 @@ import { resolveSecurity, createGate, describeSecurity, persistToken } from './s
  * @param {String} [opt.token] Bearer token（16~256 個可印字元、不含空白），優先序：opt.token > env SCREENCTL_TOKEN > token 檔 > 自動產生（僅迴路位址）。無法以任何值停用驗證
  * @param {String} [opt.tokenFile] token 檔路徑，優先序：opt.tokenFile > env SCREENCTL_TOKEN_FILE。檔案存在則讀取其內容為 token；不存在（且為迴路位址）則自動產生並寫入該檔；皆未給時寫入 `<家目錄>/.w-screenctl/token-<port>`（host 非預設時為 `token-<host>-<port>`；每次啟動重新產生並以暫存檔原子取代）。明指之檔只新建、不覆寫（啟動期間被他人先建立即拒絕啟動）。權限：POSIX 為 0600，Windows 依資料夾 ACL
  * @param {Boolean} [opt.enableEvaluate=false] 是否開啟 `POST /chrome/evaluate`（任意 JS 執行），優先序：opt.enableEvaluate > env SCREENCTL_ENABLE_EVALUATE（1/true/yes/on）> 關閉
+ * @param {Boolean} [opt.enableSystem=true] 是否開啟系統級端點（`/screenshot`、`/mouse/*`、`/keyboard/*`；操控真實桌面），優先序：opt.enableSystem > env SCREENCTL_ENABLE_SYSTEM（0/false/no/off 關閉）> 開啟。關閉時這 7 條端點回 403 `SYSTEM_DISABLED`（須先通過 token 驗證）並記入操作紀錄；`/chrome/*`（含頁面級滑鼠鍵盤）不受影響
+ * @param {Boolean} [opt.auditLog=true] 是否寫操作紀錄，優先序：opt.auditLog > env SCREENCTL_AUDIT_LOG > 開啟。關閉時啟動輸出會印警告
+ * @param {String} [opt.auditLogFile] 操作紀錄檔路徑，優先序：opt.auditLogFile > env SCREENCTL_AUDIT_LOG_FILE > `<家目錄>/.w-screenctl/audit-<port>.jsonl`（與 token 檔同目錄；host 非預設時為 `audit-<host>-<port>.jsonl`）。檔案於首次寫入才建立；POSIX 為 0600（目錄 0700）。一個紀錄檔請只給一個實例寫入
+ * @param {Integer} [opt.auditLogMaxBytes=5242880] 單一紀錄檔上限（位元組，1024~1073741824），優先序：opt.auditLogMaxBytes > env SCREENCTL_AUDIT_LOG_MAX_BYTES。超過即輪替
+ * @param {Integer} [opt.auditLogKeep=5] 輪替保留份數（0~100；`audit.jsonl.1` 為最新的舊檔），優先序：opt.auditLogKeep > env SCREENCTL_AUDIT_LOG_KEEP。總量上限約 (keep + 1) × auditLogMaxBytes；0＝不留舊檔
  * @param {Array<String>|String} [opt.allowedOrigins=[]] 允許跨站呼叫之 Origin 白名單（`scheme://host[:port]`，可為陣列或逗號分隔字串，元素須為字串；不接受 `*`、`null`、含路徑者，並正規化成瀏覽器送出之 Origin 表示法），優先序：opt.allowedOrigins > env SCREENCTL_ALLOWED_ORIGINS。預設空＝帶 Origin 之請求一律 403 且不輸出 CORS 標頭
  * @param {Object} [opt.backend] 進階／測試用：以替身取代系統級後端（須提供 screenshot、mouseClick、mouseDblClick、mouseDrag、mouseScroll、keyboardKey、keyboardType、getMemoryInfo）；預設依平台使用 bkWin／bkLinux
+ * @param {Object} [opt.chromeManager] 進階／測試用：以替身取代 Chrome 管理器（須提供 isOpen、snapshot、withPage、open、close、shutdown）；預設使用內建 ChromeManager
  * @param {Array<String>|String} [opt.allowedHosts=[]] 額外允許之 Host 標頭主機名稱（例：反向代理之對外名稱），優先序：opt.allowedHosts > env SCREENCTL_ALLOWED_HOSTS。綁迴路位址時另內建 localhost、127.0.0.1、[::1]；綁非迴路位址且未設時不檢查 Host
  * @returns {Promise<Server>} Hapi server 實例
  */
@@ -62,7 +78,8 @@ async function WScreenctl(opt = {}) {
     const sec = resolveSecurity(opt, process.env, { port })
     const gate = createGate(sec)
 
-    const chromeManager = new ChromeManager()
+    // opt.chromeManager：進階／測試用，以替身取代 Chrome 管理器（isOpen、snapshot、withPage、open、close、shutdown），測試才不必啟動 Chrome
+    const chromeManager = get(opt, 'chromeManager', null) || new ChromeManager()
 
     // ── Hapi 伺服器 ──────────────────────────────────────────
 
@@ -86,8 +103,36 @@ async function WScreenctl(opt = {}) {
 
     // 預設拒絕：所有已註冊路由皆須 token（免 token 者須顯式標 options.app.public）；
     // Host／Origin 檢查涵蓋一切請求。Hapi 內建之 notFound 與 CORS 預檢特殊路由不經 onPreAuth（只回 404／CORS 標頭，不執行 handler）
+    // 操作紀錄：onPreHandler（驗證之後）取不含機敏內容之參數摘要；response 事件（涵蓋被閘門攔下之請求）寫一行 JSONL。
+    // 紀錄器內任何失敗都不丟出（不得影響請求）
+    // redact：目前的 token 全文，寫檔前自整行清除（不論它經由哪個載體進到紀錄項）
+    const audit = sec.audit.enabled ? createAuditLogger({ ...sec.audit, redact: [sec.token] }) : null
+    if (audit) {
+        // 來源位址須在請求一開始就取下（須先於閘門之 onRequest 註冊，否則被閘門接管之請求不會執行到）：客戶端中途斷線後 socket 位址即不可得
+        server.ext('onRequest', (request, h) => {
+            try {
+                request.app.auditIp = request.info.remoteAddress
+            }
+            catch {}
+            return h.continue
+        })
+    }
+
+    // 預設拒絕：所有已註冊路由皆須 token（免 token 者須顯式標 options.app.public）；
+    // Host／Origin 檢查涵蓋一切請求。Hapi 內建之 notFound 與 CORS 預檢特殊路由不經 onPreAuth（只回 404／CORS 標頭，不執行 handler）
     server.ext('onRequest', gate.onRequest)
     server.ext('onPreAuth', gate.onPreAuth)
+
+    if (audit) {
+        server.ext('onPreHandler', (request, h) => {
+            try {
+                request.app.auditParams = summarizeParams(request.method, request.route.path, request.payload)
+            }
+            catch {}
+            return h.continue
+        })
+        server.events.on('response', (request) => audit.record(request))
+    }
 
     const validate = (payload) => ({ payload, failAction: validationFailAction })
 
@@ -253,7 +298,7 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/screenshot',
-        options: { validate: validate(S.schemaSystemScreenshot) },
+        options: { validate: validate(S.schemaSystemScreenshot), app: SYSTEM_APP },
         handler: systemRoute('screenshot', async (p) => {
             const image = await backend.screenshot(p.region || null)
             return { ok: true, image, format: 'png' }
@@ -263,7 +308,7 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/mouse/click',
-        options: { validate: validate(S.schemaSystemMouseClick) },
+        options: { validate: validate(S.schemaSystemMouseClick), app: SYSTEM_APP },
         handler: systemRoute('mouse/click', async (p) => {
             await backend.mouseClick(p.x, p.y, p.button)
             return { ok: true }
@@ -273,7 +318,7 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/mouse/dblclick',
-        options: { validate: validate(S.schemaSystemMouseDblClick) },
+        options: { validate: validate(S.schemaSystemMouseDblClick), app: SYSTEM_APP },
         handler: systemRoute('mouse/dblclick', async (p) => {
             await backend.mouseDblClick(p.x, p.y)
             return { ok: true }
@@ -283,7 +328,7 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/mouse/drag',
-        options: { validate: validate(S.schemaSystemMouseDrag) },
+        options: { validate: validate(S.schemaSystemMouseDrag), app: SYSTEM_APP },
         handler: systemRoute('mouse/drag', async (p) => {
             await backend.mouseDrag(p.fromX, p.fromY, p.toX, p.toY, p.button)
             return { ok: true }
@@ -293,7 +338,7 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/mouse/scroll',
-        options: { validate: validate(S.schemaSystemMouseScroll) },
+        options: { validate: validate(S.schemaSystemMouseScroll), app: SYSTEM_APP },
         handler: systemRoute('mouse/scroll', async (p) => {
             await backend.mouseScroll(p.x, p.y, p.direction, p.amount)
             return { ok: true }
@@ -303,7 +348,7 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/keyboard/key',
-        options: { validate: validate(S.schemaSystemKeyboardKey) },
+        options: { validate: validate(S.schemaSystemKeyboardKey), app: SYSTEM_APP },
         handler: systemRoute('keyboard/key', async (p) => {
             await backend.keyboardKey(normalizeKey(p.keys))
             return { ok: true }
@@ -313,7 +358,7 @@ async function WScreenctl(opt = {}) {
     server.route({
         method: 'POST',
         path: '/keyboard/type',
-        options: { validate: validate(S.schemaSystemKeyboardType) },
+        options: { validate: validate(S.schemaSystemKeyboardType), app: SYSTEM_APP },
         handler: systemRoute('keyboard/type', async (p) => {
             await backend.keyboardType(p.text)
             return { ok: true }
@@ -391,6 +436,8 @@ async function WScreenctl(opt = {}) {
         tokenSource: sec.tokenSource,
         tokenFile: sec.tokenFile,
         evaluate: sec.evaluate,
+        enableSystem: sec.enableSystem,
+        audit: { ...sec.audit },
         allowedOrigins: [...sec.allowedOrigins],
         allowedHosts: [...sec.allowedHosts],
     }

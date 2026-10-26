@@ -12,6 +12,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import WScreenctl from '../src/WScreenctl.mjs'
 import { rawRequest, rawSocket } from './tools/rawHttp.mjs'
+import { makeHarness } from './tools/apiHarness.mjs'
 
 const fdTest = path.dirname(fileURLToPath(import.meta.url))
 const fdTmp = path.join(fdTest, '_tmp', 'api-security')
@@ -31,68 +32,30 @@ const P_BACKEND = 8738
 
 const auth = (t = TOKEN) => ({ authorization: `Bearer ${t}` })
 
-// 所有 SCREENCTL_* 環境變數，以及優先於 opt 的 PORT、CHROME_USER_DATA，於本檔期間清空，避免開發者本機設定干擾；結束還原
-const isScreenctlEnv = (k) => k.startsWith('SCREENCTL_') || k === 'PORT' || k === 'CHROME_USER_DATA'
-let savedEnv = {}
-function clearScreenctlEnv() {
-    for (const k of Object.keys(process.env)) {
-        if (isScreenctlEnv(k)) {
-            savedEnv[k] = process.env[k]
-            delete process.env[k]
-        }
-    }
-}
-function restoreScreenctlEnv() {
-    for (const k of Object.keys(process.env)) {
-        if (isScreenctlEnv(k)) delete process.env[k]
-    }
-    Object.assign(process.env, savedEnv)
-    savedEnv = {}
-}
-
-const servers = []
-async function start(opt) {
-    const s = await WScreenctl(opt)
-    servers.push(s)
-    return s
-}
-async function stopAll() {
-    while (servers.length) {
-        const s = servers.pop()
-        try {
-            await s.stop({ timeout: 3000 })
-        }
-        catch {}
-    }
-}
-
-// 攔截 console，回傳期間輸出之全文（用於驗證 token 不入 log）
-async function captureConsole(fn) {
-    const lines = []
-    const orig = { log: console.log, warn: console.warn, error: console.error, info: console.info }
-    for (const k of Object.keys(orig)) console[k] = (...a) => lines.push(a.map(String).join(' '))
-    try {
-        const r = await fn()
-        return { r, out: lines.join('\n') }
-    }
-    finally {
-        Object.assign(console, orig)
-    }
-}
+// 伺服器啟停、環境隔離（SCREENCTL_*、PORT、CHROME_USER_DATA 清空）、console 攔截皆走共用輔助（test/tools/apiHarness.mjs）；
+// 每個 start() 預設帶測試夾內之 auditLogFile，且整個檔案期間 HOME／USERPROFILE 指到測試夾，操作紀錄與 token 檔絕不寫進真實使用者目錄
+const H = makeHarness({ defaults: () => ({ auditLogFile: path.join(fdTmp, 'audit-default.jsonl') }) })
+const servers = H.servers
+const start = (opt) => H.start(opt)
+const stopAll = () => H.stopAll()
+const captureConsole = (fn) => H.captureConsole(fn)
 
 describe('api-security：預設安全', function() {
     this.timeout(30000)
 
     before(() => {
-        clearScreenctlEnv()
+        H.clearEnv()
         fs.mkdirSync(fdTmp, { recursive: true })
+        H.useFakeHome(path.join(fdTmp, 'home-base'))
+        assert.equal(path.resolve(os.homedir()), path.resolve(fdTmp, 'home-base'), 'os.homedir() 未指到測試夾')
         // WScreenctl 每個實例會對 process 掛 SIGTERM／SIGINT 一次性監聽；本檔於同一行程內啟動多個實例，放寬上限避免無關警告
         process.setMaxListeners(100)
     })
 
     after(async () => {
         await stopAll()
-        restoreScreenctlEnv()
+        H.restoreHome()
+        H.restoreEnv()
         fs.rmSync(fdTmp, { recursive: true, force: true })
     })
 

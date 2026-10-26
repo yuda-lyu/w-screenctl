@@ -2,11 +2,12 @@ import crypto from 'crypto'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { DEFAULT_AUDIT_MAX_BYTES, DEFAULT_AUDIT_KEEP } from './auditLog.mjs'
 
 
-// 預設安全：本模組集中處理「綁定位址、token、Host／Origin 檢查、高權限端點開關」。
+// 預設安全：本模組集中處理「綁定位址、token、Host／Origin 檢查、高權限端點開關、操作紀錄設定」。
 // 新增路由時：預設即須 token（無需任何標記）；只有 options.app.public === true 之路由免 token；
-// 高權限路由以 options.app.feature 標示所屬開關（目前僅 'evaluate'）。
+// 高權限路由以 options.app.feature 標示所屬開關（'evaluate'＝任意 JS；'system'＝系統級滑鼠鍵盤與桌面截圖）。
 
 export const DEFAULT_HOST = '127.0.0.1'
 
@@ -16,9 +17,17 @@ export const ENV_NAMES = {
     token: 'SCREENCTL_TOKEN',
     tokenFile: 'SCREENCTL_TOKEN_FILE',
     enableEvaluate: 'SCREENCTL_ENABLE_EVALUATE',
+    enableSystem: 'SCREENCTL_ENABLE_SYSTEM',
     allowedOrigins: 'SCREENCTL_ALLOWED_ORIGINS',
     allowedHosts: 'SCREENCTL_ALLOWED_HOSTS',
+    auditLog: 'SCREENCTL_AUDIT_LOG',
+    auditLogFile: 'SCREENCTL_AUDIT_LOG_FILE',
+    auditLogMaxBytes: 'SCREENCTL_AUDIT_LOG_MAX_BYTES',
+    auditLogKeep: 'SCREENCTL_AUDIT_LOG_KEEP',
 }
+
+const AUDIT_MAX_BYTES_RANGE = [1024, 1073741824] // 1 KiB ~ 1 GiB
+const AUDIT_KEEP_RANGE = [0, 100]
 
 // token：可印字元（0x21~0x7e，不含空白），16~256 字元
 const TOKEN_RE = /^[\x21-\x7e]{16,256}$/
@@ -92,12 +101,37 @@ function normalizeHostName(x, name) {
     return u.hostname
 }
 
-function parseSwitch(v, name) {
+// 「未給」：undefined、null、空白字串。未給的選項會往環境變數／預設找（與 host、token 等其他選項一致）
+const isUnset = (v) => v === undefined || v === null || (typeof v === 'string' && v.trim() === '')
+
+// 開關：布林、數字 0／1，或 1/true/yes/on、0/false/no/off 字串；未給回傳 dflt；其他型別與不認得之值一律拒絕啟動（不默默當成預設）
+function parseSwitch(v, name, dflt = false) {
+    if (isUnset(v)) return dflt
     if (typeof v === 'boolean') return v
-    const s = str(v).toLowerCase()
+    if (v === 1) return true
+    if (v === 0) return false
+    const s = typeof v === 'string' ? v.trim().toLowerCase() : ''
     if (['1', 'true', 'yes', 'on'].includes(s)) return true
-    if (['', '0', 'false', 'no', 'off'].includes(s)) return false
-    throw configError(`refusing to start: ${name} must be one of 1/true/yes/on or 0/false/no/off`)
+    if (['0', 'false', 'no', 'off'].includes(s)) return false
+    throw configError(`refusing to start: ${name} must be a boolean or one of 1/true/yes/on or 0/false/no/off`)
+}
+
+// 開關之來源：選項（已給者）優先，否則環境變數，皆未給則 dflt
+function pickSwitch(optVal, envVal, optName, envName, dflt) {
+    if (!isUnset(optVal)) return parseSwitch(optVal, optName, dflt)
+    return parseSwitch(envVal, envName, dflt)
+}
+
+// 整數設定：數字或十進位數字字串；範圍外、小數、其他型別皆拒絕啟動；未給回傳 dflt
+function parseIntInRange(v, name, [min, max], dflt) {
+    if (isUnset(v)) return dflt
+    let n = NaN
+    if (typeof v === 'number') n = v
+    else if (typeof v === 'string' && /^\d+$/.test(v.trim())) n = Number(v.trim())
+    if (!Number.isInteger(n) || n < min || n > max) {
+        throw configError(`refusing to start: ${name} must be an integer between ${min} and ${max}`)
+    }
+    return n
 }
 
 
@@ -142,9 +176,25 @@ export function parseHostHeader(v) {
  * @returns {String}
  */
 export function defaultTokenFile(port, host = DEFAULT_HOST, homedir = os.homedir) {
+    return path.join(homedir(), '.w-screenctl', `token-${hostTag(host)}${port}`)
+}
+
+// 預設位址不加標記；其他位址加「位址-」（非英數與 .- 者換成 _），讓同 port 不同位址之實例不共用同一檔
+function hostTag(host) {
     const h = String(host).toLowerCase()
-    const tag = h === DEFAULT_HOST ? '' : `${h.replace(/[^a-z0-9.-]/g, '_')}-`
-    return path.join(homedir(), '.w-screenctl', `token-${tag}${port}`)
+    return h === DEFAULT_HOST ? '' : `${h.replace(/[^a-z0-9.-]/g, '_')}-`
+}
+
+/**
+ * 預設之操作紀錄檔位置：與 token 檔同目錄，`<使用者家目錄>/.w-screenctl/audit-<port>.jsonl`（非預設位址為 `audit-<位址>-<port>.jsonl`）
+ *
+ * @param {Integer} port 服務 port
+ * @param {String} [host='127.0.0.1'] 監聽位址
+ * @param {Function} [homedir=os.homedir] 取得家目錄之函式
+ * @returns {String}
+ */
+export function defaultAuditFile(port, host = DEFAULT_HOST, homedir = os.homedir) {
+    return path.join(homedir(), '.w-screenctl', `audit-${hostTag(host)}${port}.jsonl`)
 }
 
 /**
@@ -214,7 +264,7 @@ export function persistToken(file, token, { replace = true, fsApi = fs } = {}) {
  * @param {Object} [env=process.env] 環境變數
  * @param {Object} [ctx={}] 內部用
  * @param {Integer} [ctx.port] 服務 port（決定預設 token 檔名）
- * @returns {Object} 設定：host, loopback, token, tokenSource, tokenFile, persist, evaluate, allowedOrigins, allowedHosts, hostSet, cors
+ * @returns {Object} 設定：host, loopback, token, tokenSource, tokenFile, persist, persistReplace, evaluate, enableSystem, audit({enabled,file,maxBytes,keep}), allowedOrigins, allowedHosts, hostSet, cors
  */
 export function resolveSecurity(opt = {}, env = process.env, ctx = {}) {
     const o = opt && typeof opt === 'object' ? opt : {}
@@ -274,10 +324,22 @@ export function resolveSecurity(opt = {}, env = process.env, ctx = {}) {
         throw configError(`refusing to start: token (${tokenSource}) must be 16-256 printable ASCII characters without whitespace (token files must be saved as UTF-8 or ASCII)`)
     }
 
-    // 高權限端點：預設關閉
-    let evaluate = false
-    if (o.enableEvaluate !== undefined && o.enableEvaluate !== null) evaluate = parseSwitch(o.enableEvaluate, 'enableEvaluate')
-    else evaluate = parseSwitch(e[ENV_NAMES.enableEvaluate], ENV_NAMES.enableEvaluate)
+    // 高權限端點：evaluate（任意 JS）預設關閉；系統級（滑鼠鍵盤與桌面截圖）預設開啟、可關閉（供只需操控 Chrome 之情境）
+    const evaluate = pickSwitch(o.enableEvaluate, e[ENV_NAMES.enableEvaluate], 'enableEvaluate', ENV_NAMES.enableEvaluate, false)
+    const enableSystem = pickSwitch(o.enableSystem, e[ENV_NAMES.enableSystem], 'enableSystem', ENV_NAMES.enableSystem, true)
+
+    // 操作紀錄：預設開啟，預設檔與 token 檔同目錄；上限與輪替份數可調
+    const auditEnabled = pickSwitch(o.auditLog, e[ENV_NAMES.auditLog], 'auditLog', ENV_NAMES.auditLog, true)
+    if (!isUnset(o.auditLogFile) && typeof o.auditLogFile !== 'string') {
+        throw configError('refusing to start: auditLogFile must be a string path') // 非字串不默默當成未給而改用預設位置
+    }
+    const auditFileRaw = str(o.auditLogFile) || str(e[ENV_NAMES.auditLogFile])
+    const audit = {
+        enabled: auditEnabled,
+        file: auditFileRaw ? path.resolve(auditFileRaw) : defaultAuditFile(ctx.port, host),
+        maxBytes: parseIntInRange(isUnset(o.auditLogMaxBytes) ? e[ENV_NAMES.auditLogMaxBytes] : o.auditLogMaxBytes, 'auditLogMaxBytes', AUDIT_MAX_BYTES_RANGE, DEFAULT_AUDIT_MAX_BYTES),
+        keep: parseIntInRange(isUnset(o.auditLogKeep) ? e[ENV_NAMES.auditLogKeep] : o.auditLogKeep, 'auditLogKeep', AUDIT_KEEP_RANGE, DEFAULT_AUDIT_KEEP),
+    }
 
     // 跨站白名單：預設空（全拒）；不接受 * 與 null
     const rawOrigins = o.allowedOrigins !== undefined && o.allowedOrigins !== null ? o.allowedOrigins : e[ENV_NAMES.allowedOrigins]
@@ -310,6 +372,8 @@ export function resolveSecurity(opt = {}, env = process.env, ctx = {}) {
         persist,
         persistReplace,
         evaluate,
+        enableSystem,
+        audit,
         allowedOrigins,
         allowedHosts,
         hostCheck: hostSet.size > 0,
@@ -319,7 +383,9 @@ export function resolveSecurity(opt = {}, env = process.env, ctx = {}) {
 }
 
 
-function deny(h, status, code, error, headers = {}) {
+// 拒絕：回統一格式之錯誤並接管回應；同時把原因碼記在 request.app.denied，供操作紀錄使用（auditLog.buildAuditEntry）
+function deny(request, h, status, code, error, headers = {}) {
+    if (request && request.app && typeof request.app === 'object') request.app.denied = code
     const res = h.response({ ok: false, error, code, retry: 'never' }).code(status)
     for (const [k, v] of Object.entries(headers)) res.header(k, v)
     return res.takeover()
@@ -351,7 +417,9 @@ export function checkBearer(authorization, expectedDigest) {
  * onPreAuth（路由比對後，先於 payload 解析與 Joi 驗證）：
  *   - options.app.public === true 之路由（目前僅 GET /health）免 token
  *   - 其餘一律須 Bearer token（預設拒絕，不特別放行任何 method）
- *   - options.app.feature === 'evaluate' 且未開啟 → 403
+ *   - options.app.feature === 'evaluate' 且 evaluate 未開啟 → 403 EVALUATE_DISABLED
+ *   - options.app.feature === 'system' 且系統級關閉（enableSystem=false）→ 403 SYSTEM_DISABLED
+ * 每次拒絕都把原因碼記在 request.app.denied（操作紀錄用）
  * 注意：Hapi 內建之 notFound 與 CORS 預檢（OPTIONS）特殊路由不經 onPreAuth（server.ext 於建立後才註冊，
  * 不會重建特殊路由之生命週期；api-security 之預檢測試鎖定此行為）。預檢因此不需 token，且已受 onRequest 的 Origin／Host 檢查；
  * 它只回 CORS 標頭，不執行任何 handler。
@@ -377,18 +445,18 @@ export function createGate(cfg) {
 
     const onRequest = (request, h) => {
         if (rawCount(request, 'host') > 1) {
-            return deny(h, 403, 'FORBIDDEN_HOST', 'forbidden: duplicate Host header')
+            return deny(request, h, 403, 'FORBIDDEN_HOST', 'forbidden: duplicate Host header')
         }
         if (cfg.hostCheck) {
             const name = parseHostHeader(request.headers.host)
             if (name === null || !cfg.hostSet.has(name)) {
-                return deny(h, 403, 'FORBIDDEN_HOST', 'forbidden: Host header is not allowed')
+                return deny(request, h, 403, 'FORBIDDEN_HOST', 'forbidden: Host header is not allowed')
             }
         }
         // 請求之 Origin 與白名單逐字比對（瀏覽器送出的已是正規化小寫；白名單已於設定時正規化），檢查之值即使用之值
         const origin = request.headers.origin
         if (origin !== undefined && !origins.has(String(origin))) {
-            return deny(h, 403, 'FORBIDDEN_ORIGIN', 'forbidden: cross-origin requests are not allowed')
+            return deny(request, h, 403, 'FORBIDDEN_ORIGIN', 'forbidden: cross-origin requests are not allowed')
         }
         return h.continue
     }
@@ -397,12 +465,18 @@ export function createGate(cfg) {
         const app = (request.route && request.route.settings && request.route.settings.app) || {}
         if (app.public === true) return h.continue
         if (rawCount(request, 'authorization') > 1 || !checkBearer(request.headers.authorization, digest)) {
-            return deny(h, 401, 'UNAUTHORIZED', 'unauthorized: missing or invalid Bearer token', { 'www-authenticate': 'Bearer' })
+            return deny(request, h, 401, 'UNAUTHORIZED', 'unauthorized: missing or invalid Bearer token', { 'www-authenticate': 'Bearer' })
         }
         if (app.feature === 'evaluate' && !cfg.evaluate) {
             return deny(
-                h, 403, 'EVALUATE_DISABLED',
+                request, h, 403, 'EVALUATE_DISABLED',
                 `forbidden: /chrome/evaluate is disabled; enable it with option "enableEvaluate", env ${ENV_NAMES.enableEvaluate}=1 or "node g.mjs --evaluate"`,
+            )
+        }
+        if (app.feature === 'system' && !cfg.enableSystem) {
+            return deny(
+                request, h, 403, 'SYSTEM_DISABLED',
+                `forbidden: system-level mouse/keyboard/screenshot endpoints are disabled; enable them with option "enableSystem", env ${ENV_NAMES.enableSystem}=1 (or start without "node g.mjs --no-system")`,
             )
         }
         return h.continue
@@ -438,8 +512,19 @@ export function describeSecurity(cfg) {
         )
         if (!cfg.allowedHosts.length) warn.push('[security] WARNING: Host header is not checked on a non-loopback bind; set allowedHosts to enable it.')
     }
+    // 目前啟用之能力（系統級、evaluate、操作紀錄路徑）
+    const a = cfg.audit
+    info.push(
+        '[security] capabilities: chrome=on' +
+        ` | system(mouse/keyboard/screenshot)=${cfg.enableSystem ? 'on' : 'DISABLED'}` +
+        ` | evaluate=${cfg.evaluate ? 'ON' : 'off'}` +
+        ` | audit-log=${a.enabled ? `${a.file} (max ${a.maxBytes} bytes x ${a.keep} rotated)` : 'OFF'}`,
+    )
     if (cfg.evaluate) {
         warn.push('[security] WARNING: /chrome/evaluate is ENABLED: callers holding the token can run arbitrary JavaScript in the controlled Chrome page.')
+    }
+    if (!a.enabled) {
+        warn.push('[security] WARNING: audit log is OFF: control actions and rejected requests are not recorded.')
     }
     return { info, warn }
 }

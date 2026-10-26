@@ -13,6 +13,9 @@ const USAGE = `Usage: node g.mjs [options]
   --evaluate              enable POST /chrome/evaluate (arbitrary JS in the page; default off; env SCREENCTL_ENABLE_EVALUATE=1)
   --allow-origin <origin> allow cross-origin calls from this origin, repeatable (env SCREENCTL_ALLOWED_ORIGINS, comma separated)
   --allow-host <name>     extra accepted Host header name, repeatable (env SCREENCTL_ALLOWED_HOSTS, comma separated)
+  --no-system             disable the system-level endpoints (/screenshot, /mouse/*, /keyboard/*): 403 SYSTEM_DISABLED; Chrome-only use (env SCREENCTL_ENABLE_SYSTEM=0)
+  --no-audit-log          do not write the audit log (default: every control action and rejected request is recorded; env SCREENCTL_AUDIT_LOG=0)
+  --audit-log-file <path> audit log location (default ~/.w-screenctl/audit-<port>.jsonl; env SCREENCTL_AUDIT_LOG_FILE; size/rotation: SCREENCTL_AUDIT_LOG_MAX_BYTES, SCREENCTL_AUDIT_LOG_KEEP)
   -h, --help              show this help
 
 Token: env SCREENCTL_TOKEN, or a token file, or generated at startup (loopback only). Port: env PORT (default 7000).`
@@ -26,6 +29,9 @@ try {
             'evaluate': { type: 'boolean' },
             'allow-origin': { type: 'string', multiple: true },
             'allow-host': { type: 'string', multiple: true },
+            'no-system': { type: 'boolean' },
+            'no-audit-log': { type: 'boolean' },
+            'audit-log-file': { type: 'string' },
             'help': { type: 'boolean', short: 'h' },
         },
         strict: true,
@@ -48,6 +54,9 @@ if (values['token-file']) opt.tokenFile = values['token-file']
 if (values.evaluate) opt.enableEvaluate = true
 if (values['allow-origin']) opt.allowedOrigins = values['allow-origin']
 if (values['allow-host']) opt.allowedHosts = values['allow-host']
+if (values['no-system']) opt.enableSystem = false
+if (values['no-audit-log']) opt.auditLog = false
+if (values['audit-log-file']) opt.auditLogFile = values['audit-log-file']
 
 WScreenctl(opt).catch((err) => {
     // 設定有誤／不安全而拒絕啟動：只印訊息，不印堆疊

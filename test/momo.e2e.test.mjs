@@ -29,7 +29,8 @@ describe('e2e: chrome 開→ momo →截圖→關', function() {
     let server
 
     before(async () => {
-        server = await WScreenctl({ port: PORT, token: TOKEN })
+        // auditLog:false：本測試不驗操作紀錄，且預設紀錄檔位於使用者目錄
+        server = await WScreenctl({ port: PORT, token: TOKEN, auditLog: false })
     })
 
     after(async () => {
