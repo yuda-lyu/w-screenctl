@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    
+    <meta charset="utf-8">
+    <title>auditLog.mjs - Documentation</title>
+    
+    
+    <script src="scripts/prettify/prettify.js"></script>
+    <script src="scripts/prettify/lang-css.js"></script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc.css">
+    <script src="scripts/nav.js" defer></script>
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body>
+
+<input type="checkbox" id="nav-trigger" class="nav-trigger" />
+<label for="nav-trigger" class="navicon-button x">
+  <div class="navicon"></div>
+</label>
+
+<label for="nav-trigger" class="overlay"></label>
+
+<nav >
+    
+    
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#TIMEOUT_LAUNCH">TIMEOUT_LAUNCH</a></li><li><a href="global.html#WScreenctl">WScreenctl</a></li><li><a href="global.html#buildAuditEntry">buildAuditEntry</a></li><li><a href="global.html#checkBearer">checkBearer</a></li><li><a href="global.html#createAuditLogger">createAuditLogger</a></li><li><a href="global.html#createGate">createGate</a></li><li><a href="global.html#defaultAuditFile">defaultAuditFile</a></li><li><a href="global.html#defaultTokenFile">defaultTokenFile</a></li><li><a href="global.html#describeSecurity">describeSecurity</a></li><li><a href="global.html#isLoopbackHost">isLoopbackHost</a></li><li><a href="global.html#parseHostHeader">parseHostHeader</a></li><li><a href="global.html#persistToken">persistToken</a></li><li><a href="global.html#redactKeys">redactKeys</a></li><li><a href="global.html#resolveSecurity">resolveSecurity</a></li><li><a href="global.html#stripUrl">stripUrl</a></li><li><a href="global.html#summarizeParams">summarizeParams</a></li></ul>
+    
+</nav>
+
+<div id="main">
+    
+    <h1 class="page-title">auditLog.mjs</h1>
+    
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>import crypto from 'crypto'
+import fs from 'fs'
+import path from 'path'
+
+
+// 操作紀錄（audit log）：每次經 HTTP 之控制動作與每次被閘門拒絕之請求，各記一行 JSON（JSONL）。
+// 隱私原則：參數摘要一律由「白名單欄位」複製而來，絕不展開整個 payload；
+// token（Authorization）、/keyboard/type 之文字、/chrome/evaluate 之 script 全文、URL 之查詢字串／片段／帳密、請求本體，一律不記；
+// 此外寫入器對「目前的 token 全文」做最後一道清除（不論它經由哪個載體進到紀錄項），Origin／Host 只記通過語法檢查之值。
+
+export const DEFAULT_AUDIT_MAX_BYTES = 5 * 1024 * 1024
+export const DEFAULT_AUDIT_KEEP = 5
+
+const MAX_PATH = 200 // 端點路徑（使用者可控，截斷）
+const MAX_SEGMENT = 24 // 未註冊路徑中，超過此長度的片段視為可能含機敏值而遮蔽
+const MAX_URL = 300
+const MAX_HEADER = 200 // 被拒絕時附記之 Origin／Host
+const MAX_KEYS = 200
+
+
+function sha256Hex(s) {
+    return crypto.createHash('sha256').update(String(s), 'utf8').digest('hex')
+}
+
+// 只複製原始型別（數字、布林、短字串）之白名單欄位
+function pickPrim(o, keys) {
+    const r = {}
+    if (!o || typeof o !== 'object') return r
+    for (const k of keys) {
+        const v = o[k]
+        if (typeof v === 'number' || typeof v === 'boolean') r[k] = v
+        else if (typeof v === 'string') r[k] = v.slice(0, 32)
+    }
+    return r
+}
+
+/**
+ * 網址去除查詢字串、片段與帳密，只留 協定／主機／port／路徑（任何協定皆然，含 about:// 這類帶 authority 之寫法）
+ *
+ * @param {String} u 網址
+ * @returns {String} 無法解析回傳 `&lt;invalid>`
+ */
+export function stripUrl(u) {
+    try {
+        const x = new URL(String(u))
+        const slashes = x.host || x.protocol === 'file:' ? '//' : ''
+        return `${x.protocol}${slashes}${x.host}${x.pathname}`.slice(0, MAX_URL)
+    }
+    catch {
+        return '&lt;invalid>'
+    }
+}
+
+
+// ── 鍵名遮蔽 ──
+// 修飾鍵（含 shift）；其中除 shift 外者組合時視為快捷鍵
+const MODIFIER_KEYS = new Set([
+    'ctrl', 'control', 'control_l', 'control_r', 'shift', 'shift_l', 'shift_r', 'alt', 'alt_l', 'alt_r', 'altgr', 'iso_level3_shift',
+    'meta', 'meta_l', 'meta_r', 'super', 'super_l', 'super_r', 'win', 'windows', 'cmd', 'command', 'option', 'hyper', 'hyper_l', 'hyper_r',
+])
+const NAMED_KEYS = new Set([
+    'enter', 'return', 'kp_enter', 'tab', 'iso_left_tab', 'escape', 'esc', 'backspace', 'delete', 'del', 'insert', 'ins', 'home', 'end',
+    'pageup', 'pagedown', 'page_up', 'page_down', 'prior', 'next', 'up', 'down', 'left', 'right', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright',
+    'space', 'capslock', 'caps_lock', 'numlock', 'num_lock', 'scrolllock', 'scroll_lock', 'printscreen', 'print', 'pause', 'menu', 'contextmenu',
+    'break', 'clear', 'select', 'help',
+])
+const NAMED_KEY_RES = [
+    /^f([1-9]|1\d|2[0-4])$/, // F1~F24
+    /^(kp|numpad)_[a-z_]+$/, // 小鍵盤之具名鍵（kp_add…；數字鍵另視為字元）
+    /^(xf86|media|volume|audio|browser)\w*$/, // 多媒體鍵
+]
+// 這些名稱代表「一個會被打出來的字元」（Playwright 的 KeyA／Digit5、xdotool 的 minus／kp_5…），等同單一可印字元
+const CHAR_KEY_RES = [
+    /^key[a-z]$/i,
+    /^digit\d$/i,
+    /^(kp_|numpad)\d$/i,
+    /^(minus|plus|equal|comma|period|slash|backslash|semicolon|apostrophe|quote|grave|backquote|bracketleft|bracketright|underscore|asterisk|at|numbersign|dollar|percent|ampersand|exclam|question|colon|less|greater|parenleft|parenright|asciitilde|asciicircum|bar|braceleft|braceright)$/i,
+]
+const SEGMENTER = typeof Intl !== 'undefined' &amp;&amp; Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null
+
+// 使用者看到的「一個字」：以字素（grapheme）計，非 UTF-16 長度（單一 emoji、組合字元、ZWJ 序列都算一個）
+function graphemeCount(s) {
+    return SEGMENTER ? [...SEGMENTER.segment(s)].length : [...s].length
+}
+
+const isShortcutMod = (t) => {
+    const l = t.toLowerCase().replace(/_[lr]$/, '')
+    return MODIFIER_KEYS.has(l) &amp;&amp; l !== 'shift'
+}
+
+// 'named'＝具名鍵（原樣記）；'char'＝會打出一個字元；'unknown'＝其他（不是已知鍵名，不記字面）
+function kindOfKey(t) {
+    if (t === '') return 'named'
+    const l = t.toLowerCase()
+    if (MODIFIER_KEYS.has(l) || NAMED_KEYS.has(l) || NAMED_KEY_RES.some((r) => r.test(l))) return 'named'
+    if (CHAR_KEY_RES.some((r) => r.test(t)) || graphemeCount(t) === 1) return 'char'
+    return 'unknown'
+}
+
+/**
+ * 鍵名遮蔽：已知的具名鍵與快捷鍵（`Enter`、`F5`、`ctrl+a`）原樣記；
+ * 單一可印字元（可能是以逐鍵方式輸入之密碼）只記 `&lt;char>`（含 shift 等非快捷修飾鍵者亦同：shift+7 → shift+&lt;char>）；
+ * 不是已知鍵名之其他字串（例如被誤送進來的整段文字）只記 `&lt;key>`
+ *
+ * @param {String} keys 鍵名或組合鍵
+ * @returns {String}
+ */
+export function redactKeys(keys) {
+    const s = String(keys).slice(0, MAX_KEYS)
+    if (s === '+') return '&lt;char>'
+    let mods
+    let last
+    if (s.endsWith('++')) {
+        mods = s.slice(0, -2).split('+')
+        last = '+'
+    }
+    else {
+        mods = s.split('+')
+        last = mods.pop()
+    }
+    const shortcut = mods.some(isShortcutMod)
+    const outMods = mods.map((m) => (kindOfKey(m) === 'named' ? m : '&lt;key>'))
+    const kind = kindOfKey(last)
+    const outLast = kind === 'named' ? last : kind === 'char' ? (shortcut ? last : '&lt;char>') : '&lt;key>'
+    return [...outMods, outLast].join('+')
+}
+
+
+// ── 參數摘要登錄表：key＝`METHOD path`；新增路由必須在此登錄（api-audit 測試會比對路由表），未登錄者預設不記任何參數 ──
+
+const sumMouseClick = (p) => pickPrim(p, ['x', 'y', 'button'])
+const sumMouseDblClick = (p) => pickPrim(p, ['x', 'y'])
+const sumMouseDrag = (p) => pickPrim(p, ['fromX', 'fromY', 'toX', 'toY', 'button'])
+const sumMouseScroll = (p) => pickPrim(p, ['x', 'y', 'direction', 'amount'])
+const sumKey = (p) => (typeof p.keys === 'string' ? { keys: redactKeys(p.keys) } : {})
+const sumType = (p) => (typeof p.text === 'string' ? { textLen: p.text.length } : {})
+const sumNone = () => ({})
+const sumNavigate = (p) => (typeof p.url === 'string' ? { url: stripUrl(p.url) } : {})
+const sumEvaluate = (p) => (typeof p.script === 'string' ? { scriptLen: p.script.length, scriptSha256: sha256Hex(p.script) } : {})
+const sumScreenshot = (p) => (p.region &amp;&amp; typeof p.region === 'object' ? { region: pickPrim(p.region, ['x', 'y', 'width', 'height']) } : {})
+const sumOpen = (p) => {
+    const r = {}
+    if (typeof p.url === 'string') r.url = stripUrl(p.url)
+    if (typeof p.mode === 'string') r.mode = p.mode.slice(0, 16)
+    if (p.window &amp;&amp; typeof p.window === 'object') r.window = pickPrim(p.window, ['x', 'y', 'width', 'height'])
+    if (p.viewport &amp;&amp; typeof p.viewport === 'object') r.viewport = pickPrim(p.viewport, ['width', 'height'])
+    if (p.userData !== undefined) r.userData = true // 只記「有指定自訂 profile」，不記路徑
+    if (p.opt &amp;&amp; typeof p.opt === 'object') r.opt = pickPrim(p.opt, ['headless', 'disableGpu', 'disableSandbox', 'deviceScaleFactor'])
+    return r
+}
+
+const SUMMARIZERS = {
+    'GET /health': sumNone,
+    'POST /chrome/open': sumOpen,
+    'GET /chrome': sumNone,
+    'DELETE /chrome': sumNone,
+    'POST /chrome/screenshot': sumNone,
+    'POST /chrome/navigate': sumNavigate,
+    'POST /chrome/evaluate': sumEvaluate,
+    'POST /chrome/mouse/click': sumMouseClick,
+    'POST /chrome/mouse/dblclick': sumMouseDblClick,
+    'POST /chrome/mouse/drag': sumMouseDrag,
+    'POST /chrome/mouse/scroll': sumMouseScroll,
+    'POST /chrome/keyboard/key': sumKey,
+    'POST /chrome/keyboard/type': sumType,
+    'POST /screenshot': sumScreenshot,
+    'POST /mouse/click': sumMouseClick,
+    'POST /mouse/dblclick': sumMouseDblClick,
+    'POST /mouse/drag': sumMouseDrag,
+    'POST /mouse/scroll': sumMouseScroll,
+    'POST /keyboard/key': sumKey,
+    'POST /keyboard/type': sumType,
+}
+
+export const AUDIT_ROUTE_KEYS = Object.keys(SUMMARIZERS)
+
+/**
+ * 依端點產生「不含機敏內容」之參數摘要
+ *
+ * @param {String} method HTTP 方法
+ * @param {String} routePath 路由路徑
+ * @param {Object} payload 已通過驗證之 payload
+ * @returns {Object}
+ */
+export function summarizeParams(method, routePath, payload) {
+    const m = String(method).toUpperCase()
+    const fn = SUMMARIZERS[`${m === 'HEAD' ? 'GET' : m} ${routePath}`]
+    if (!fn) return {}
+    try {
+        return fn(payload &amp;&amp; typeof payload === 'object' ? payload : {})
+    }
+    catch {
+        return {}
+    }
+}
+
+
+function normIp(a) {
+    const s = typeof a === 'string' ? a : ''
+    const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(s)
+    return (m ? m[1] : s).slice(0, 64)
+}
+
+// 未註冊路徑是使用者可控字串：截斷，且過長的片段（可能是被誤放進路徑的 token 或其他機敏值）遮蔽
+function maskPath(p) {
+    return String(p).slice(0, MAX_PATH).split('/').map((seg) => (seg.length > MAX_SEGMENT ? '&lt;long>' : seg)).join('/')
+}
+
+// Origin 只記 scheme://host[:port]（去除帳密、路徑、查詢字串）；無法解析者記 &lt;invalid>
+function cleanOrigin(v) {
+    const s = String(v).slice(0, 400)
+    if (s === 'null') return 'null'
+    try {
+        const u = new URL(s)
+        return u.origin === 'null' ? '&lt;invalid>' : u.origin.slice(0, MAX_HEADER)
+    }
+    catch {
+        return '&lt;invalid>'
+    }
+}
+
+// Host 只記語法合法之 host[:port]；其餘記 &lt;invalid>
+function cleanHost(v) {
+    const s = String(v).trim().slice(0, 300)
+    return /^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9._-]+)(:\d{1,5})?$/.test(s) ? s.slice(0, MAX_HEADER) : '&lt;invalid>'
+}
+
+/**
+ * 由 Hapi request（於 response 事件時）組出一筆紀錄；不該記的請求回傳 null
+ *
+ * 記：被閘門拒絕者（任何端點，含未註冊路徑與 /health）；已註冊且非公開之路由（成功、驗證失敗、handler 失敗皆記）
+ * 不記：公開路由成功（/health）、未註冊路徑之 404、預檢成功
+ *
+ * @param {Object} request Hapi request
+ * @returns {Object|null}
+ */
+export function buildAuditEntry(request) {
+    if (!request || typeof request !== 'object') return null
+    const app = request.app || {}
+    const denied = typeof app.denied === 'string' &amp;&amp; app.denied !== '' ? app.denied : ''
+    const route = request.route || {}
+    const registered = typeof route.path === 'string' &amp;&amp; route.path !== '/{p*}'
+    const isPublic = !!(route.settings &amp;&amp; route.settings.app &amp;&amp; route.settings.app.public === true)
+    if (!denied &amp;&amp; (!registered || isPublic)) return null
+
+    const info = request.info || {}
+    const res = request.response
+    let status = 0
+    let source
+    if (res) {
+        status = (res.isBoom ? res.output &amp;&amp; res.output.statusCode : res.statusCode) || 0
+        source = res.source
+    }
+    const received = Number(info.received) || Date.now()
+    const responded = Number(info.responded) || Date.now()
+
+    const e = {
+        ts: new Date(received).toISOString(),
+        method: String(request.method || '').toUpperCase(),
+        // 已註冊路由記路由樣板（不可能含機敏值）；未註冊路徑記遮蔽後之原值
+        path: registered ? route.path.slice(0, MAX_PATH) : maskPath(request.path || ''),
+        ip: normIp(app.auditIp || info.remoteAddress), // 請求一開始取下之位址優先（客戶端中途斷線後 socket 位址即不可得）
+        status,
+        ms: Math.max(0, responded - received),
+    }
+    // 只取結果旗標與穩定代碼，不取錯誤訊息全文與回應內容（例如截圖 base64）；回應本體無 ok 欄位者（例如 GET /chrome）以 HTTP 狀態推導
+    if (source &amp;&amp; typeof source === 'object' &amp;&amp; typeof source.ok === 'boolean') {
+        e.ok = source.ok
+        if (typeof source.code === 'string' &amp;&amp; /^[A-Z][A-Z0-9_]{0,63}$/.test(source.code)) e.code = source.code
+    }
+    else if (status > 0) {
+        e.ok = status &lt; 400
+    }
+    if (denied) {
+        e.denied = denied.slice(0, 64)
+        const h = request.headers || {}
+        if (denied === 'FORBIDDEN_ORIGIN' &amp;&amp; h.origin !== undefined) e.origin = cleanOrigin(h.origin)
+        if (denied === 'FORBIDDEN_HOST' &amp;&amp; h.host !== undefined) e.host = cleanHost(h.host)
+    }
+    else if (app.auditParams &amp;&amp; typeof app.auditParams === 'object') {
+        e.params = app.auditParams
+    }
+    return e
+}
+
+
+/**
+ * 建立紀錄寫入器：同步 append（一筆一行，不交錯）、超過 maxBytes 即輪替（保留 keep 份舊檔）；
+ * 任何寫檔失敗都不丟例外（不得使請求失敗），連續失敗只警告一次，恢復成功後再失敗才再警告
+ *
+ * - 檔案於首次寫入才建立（目錄 0700、檔案 0600，POSIX；既有檔案若權限寬於 0600 會於首次寫入後收緊，既有目錄不改）
+ * - 每次寫入前重新取得實際檔案大小（不快取）：部分寫入、外部截斷、同檔多寫入者都不會讓上限失準
+ * - 輪替：先把目前檔改名為暫存檔（此步失敗時其他檔都沒動，之後可重試），再 `file.(keep-1)`→`file.keep`…，最後暫存檔→`file.1`；中途失敗會把目前檔還原。
+ *   `keep=0` 則超過上限即清掉重寫。首次寫入時順便刪除超過 keep 份之舊輪替檔（調降保留份數後會收斂）。輪替失敗時丟棄新紀錄，使檔案維持有界
+ * - 單筆即超過上限者仍完整寫入（不拆行、不丟棄）。調降 maxBytes 後，既有的較大舊檔不會被截斷，隨輪替自然汰換
+ * - append 失敗（可能留下半行）後，下一筆前置換行，使該筆仍可獨立解析
+ * - `redact`：目前的 token 等機密全文；寫入前會自序列化後的整行清除（含 JSON 跳脫形式），不論它經由哪個載體進到紀錄項
+ * 一個紀錄檔請只給一個實例寫入（預設檔名含 port 與非預設位址）。
+ *
+ * @param {Object} cfg
+ * @param {String} cfg.file 紀錄檔絕對路徑
+ * @param {Integer} [cfg.maxBytes] 單檔上限（位元組）
+ * @param {Integer} [cfg.keep] 輪替保留份數
+ * @param {Array&lt;String>} [cfg.redact] 須自紀錄中清除之機密全文
+ * @param {Object} [deps={}]
+ * @param {Object} [deps.fsApi=fs] 檔案系統實作（測試注入故障用）
+ * @param {Function} [deps.warn] 警告輸出，預設 console.warn
+ * @param {String} [deps.platform=process.platform] 平台（決定是否收緊既有檔案權限）
+ * @returns {{file: String, write: Function, record: Function}}
+ */
+export function createAuditLogger(cfg, deps = {}) {
+    const fsApi = deps.fsApi || fs
+    const warn = deps.warn || ((m) => console.warn(m))
+    const platform = deps.platform || process.platform
+    const file = cfg.file
+    const maxBytes = cfg.maxBytes === undefined ? DEFAULT_AUDIT_MAX_BYTES : cfg.maxBytes
+    const keep = cfg.keep === undefined ? DEFAULT_AUDIT_KEEP : cfg.keep
+    const tmpFile = `${file}.rotating`
+    const secretForms = []
+    for (const s of Array.isArray(cfg.redact) ? cfg.redact : []) {
+        if (typeof s !== 'string' || s.length &lt; 8) continue
+        secretForms.push(s)
+        const esc = JSON.stringify(s).slice(1, -1)
+        if (esc !== s) secretForms.push(esc)
+    }
+    let failing = false
+    let dirty = false // 前一次 append 失敗（可能留下半行）
+    let pruned = false
+    let modeChecked = false
+
+    const fail = (err) => {
+        if (failing) return
+        failing = true
+        try {
+            warn(`[audit] cannot write audit log "${file}": ${err &amp;&amp; err.message ? err.message : String(err)} (control actions keep working; this warning is not repeated until a write succeeds)`)
+        }
+        catch {}
+    }
+
+    const scrub = (line) => {
+        let out = line
+        for (const f of secretForms) {
+            if (out.includes(f)) out = out.split(f).join('&lt;redacted>')
+        }
+        return out
+    }
+
+    const rotate = () => {
+        fsApi.rmSync(tmpFile, { force: true }) // 前次異常中斷殘留者
+        fsApi.renameSync(file, tmpFile) // 最先動目前檔：此步失敗（最常見：檔案被其他程式占用）時，其他輪替檔都還沒動
+        try {
+            if (keep > 0) {
+                fsApi.rmSync(`${file}.${keep}`, { force: true })
+                for (let i = keep - 1; i >= 1; i--) {
+                    if (fsApi.existsSync(`${file}.${i}`)) fsApi.renameSync(`${file}.${i}`, `${file}.${i + 1}`)
+                }
+                fsApi.renameSync(tmpFile, `${file}.1`)
+            }
+            else {
+                fsApi.rmSync(tmpFile, { force: true })
+            }
+        }
+        catch (err) {
+            try {
+                if (!fsApi.existsSync(file) &amp;&amp; fsApi.existsSync(tmpFile)) fsApi.renameSync(tmpFile, file) // 還原目前檔
+            }
+            catch {}
+            throw err
+        }
+    }
+
+    // 調降保留份數後，超出 keep 的舊輪替檔一併刪除
+    const prune = () => {
+        for (let i = keep + 1; i &lt;= keep + 100; i++) fsApi.rmSync(`${file}.${i}`, { force: true })
+    }
+
+    const append = (line) => {
+        try {
+            fsApi.appendFileSync(file, line, { mode: 0o600 })
+        }
+        catch (err) {
+            if (!err || err.code !== 'ENOENT') throw err
+            fsApi.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }) // 首次寫入或目錄被刪：建立後重試一次
+            fsApi.appendFileSync(file, line, { mode: 0o600 })
+        }
+    }
+
+    // mode 參數只對「新建」的檔案生效；既有檔案若寬於 0600 則收緊（POSIX，盡力而為）
+    const tightenMode = () => {
+        if (modeChecked || platform === 'win32') return
+        modeChecked = true
+        try {
+            const st = fsApi.statSync(file)
+            if (st.mode &amp; 0o077) fsApi.chmodSync(file, 0o600)
+        }
+        catch {}
+    }
+
+    const write = (entry) => {
+        let line
+        try {
+            line = scrub(JSON.stringify(entry)) + '\n'
+        }
+        catch (err) {
+            fail(err)
+            return
+        }
+        if (dirty) line = '\n' + line
+        const bytes = Buffer.byteLength(line, 'utf8')
+        let appending = false
+        try {
+            if (!pruned) {
+                pruned = true
+                prune()
+            }
+            let size = 0
+            try {
+                size = fsApi.statSync(file).size
+            }
+            catch {}
+            if (size > 0 &amp;&amp; size + bytes > maxBytes) rotate() // 失敗則丟棄此筆（檔案維持有界）
+            appending = true
+            append(line)
+            dirty = false
+            failing = false
+            tightenMode()
+        }
+        catch (err) {
+            if (appending) dirty = true
+            fail(err)
+        }
+    }
+
+    const record = (request) => {
+        try {
+            const e = buildAuditEntry(request)
+            if (e) write(e)
+        }
+        catch (err) {
+            fail(err)
+        }
+    }
+
+    return { file, write, record }
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+    
+    
+</div>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 4.0.5</a> on Wed Oct 28 2026 00:07:49 GMT+0800 (台北標準時間) using the <a href="https://github.com/clenemt/docdash">docdash</a> theme.
+</footer>
+
+<script>prettyPrint();</script>
+<script src="scripts/polyfill.js"></script>
+<script src="scripts/linenumber.js"></script>
+
+
+
+</body>
+</html>
