@@ -29,7 +29,7 @@
 <nav >
     
     
-    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#TIMEOUT_LAUNCH">TIMEOUT_LAUNCH</a></li><li><a href="global.html#WScreenctl">WScreenctl</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#TIMEOUT_LAUNCH">TIMEOUT_LAUNCH</a></li><li><a href="global.html#WScreenctl">WScreenctl</a></li><li><a href="global.html#buildAuditEntry">buildAuditEntry</a></li><li><a href="global.html#checkBearer">checkBearer</a></li><li><a href="global.html#createAuditLogger">createAuditLogger</a></li><li><a href="global.html#createGate">createGate</a></li><li><a href="global.html#defaultAuditFile">defaultAuditFile</a></li><li><a href="global.html#defaultTokenFile">defaultTokenFile</a></li><li><a href="global.html#describeSecurity">describeSecurity</a></li><li><a href="global.html#isLoopbackHost">isLoopbackHost</a></li><li><a href="global.html#parseHostHeader">parseHostHeader</a></li><li><a href="global.html#persistToken">persistToken</a></li><li><a href="global.html#redactKeys">redactKeys</a></li><li><a href="global.html#resolveSecurity">resolveSecurity</a></li><li><a href="global.html#stripUrl">stripUrl</a></li><li><a href="global.html#summarizeParams">summarizeParams</a></li></ul>
     
 </nav>
 
@@ -224,13 +224,25 @@ chromeState-tagged Error 給 errResponse 統一處理。</p>
 <p><code>/chrome/open</code> 預設以 headless 啟動；需要實體視窗（系統級滑鼠鍵盤 / 系統截圖操作 chrome 時）
 得於 payload 送 <code>opt.headless: false</code></p>
 <p>零信任設計：caller 可任意 retry / 中斷 / agent swap，server 維持自洽狀態。所有 chrome lifecycle
-透過 ChromeManager 序列化；所有路由經由 routeFactory 統一錯誤處理；所有 payload 經 Joi 驗證。</p></li></ul></dd>
+透過 ChromeManager 序列化；所有路由經由 routeFactory 統一錯誤處理；所有 payload 經 Joi 驗證。</p>
+<p>預設安全（1.0.26 之後的版本起；破壞性變更）：</p>
+<ul>
+<li>只綁 127.0.0.1；綁其他位址須自行提供 token，否則拒絕啟動（丟出 code 為 SCREENCTL_CONFIG 之 Error）</li>
+<li>除 <code>GET /health</code> 外所有端點須 <code>Authorization: Bearer &lt;token&gt;</code>（定時比較）。token 未給時啟動自動產生並寫入 token 檔</li>
+<li>預設不開 CORS；Host 標頭須為本機名稱（擋 DNS rebinding）；帶 Origin 之請求預設一律拒絕，可由 <code>allowedOrigins</code> 放行白名單</li>
+<li><code>/chrome/evaluate</code> 預設關閉（403），須 <code>enableEvaluate</code> 顯式開啟
+新增之安全選項優先序皆為：選項 &gt; 環境變數 &gt; 預設（<code>port</code>、<code>fdUserData</code> 維持既有之環境變數優先）</li>
+</ul>
+<p>操作紀錄（預設開啟）：每次控制動作（系統級 /keyboard、/mouse、/screenshot，與 /chrome/*）與每次被閘門拒絕之請求（401／403）各記一行 JSON 到紀錄檔。
+內容：時間（ISO）、方法、路徑、來源 IP、狀態碼、耗時、結果（ok／code）、不含機敏內容之參數摘要（座標、鍵名可記；/keyboard/type 與 /chrome/keyboard/type 只記文字長度；
+/chrome/evaluate 只記 script 長度與 SHA-256；網址去除查詢字串；單一可印字元之按鍵不記字面）；拒絕事件記拒絕原因（denied）。<strong>token、請求本體一律不記</strong>。
+紀錄檔超過上限即輪替；寫檔失敗不影響請求（console 警告一次）。可關閉系統級端點（<code>enableSystem: false</code>）供只需操控 Chrome 之情境。</p></li></ul></dd>
     
 
     
     <dt class="tag-source">Source:</dt>
     <dd class="tag-source"><ul class="dummy"><li>
-        <a href="WScreenctl.mjs.html">WScreenctl.mjs</a>, <a href="WScreenctl.mjs.html#line30">line 30</a>
+        <a href="WScreenctl.mjs.html">WScreenctl.mjs</a>, <a href="WScreenctl.mjs.html#line61">line 61</a>
     </li></ul></dd>
     
 
@@ -444,6 +456,522 @@ chromeState-tagged Error 給 errResponse 統一處理。</p>
         </tr>
 
     
+
+        <tr>
+            
+                <td class="name"><code>host</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>'127.0.0.1'</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>監聽位址，優先序：opt.host &gt; env SCREENCTL_HOST &gt; 127.0.0.1。非迴路位址（如 0.0.0.0）且未提供 token 時拒絕啟動</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>token</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>Bearer token（16~256 個可印字元、不含空白），優先序：opt.token &gt; env SCREENCTL_TOKEN &gt; token 檔 &gt; 自動產生（僅迴路位址）。無法以任何值停用驗證</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>tokenFile</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>token 檔路徑，優先序：opt.tokenFile &gt; env SCREENCTL_TOKEN_FILE。檔案存在則讀取其內容為 token；不存在（且為迴路位址）則自動產生並寫入該檔；皆未給時寫入 <code>&lt;家目錄&gt;/.w-screenctl/token-&lt;port&gt;</code>（host 非預設時為 <code>token-&lt;host&gt;-&lt;port&gt;</code>；每次啟動重新產生並以暫存檔原子取代）。明指之檔只新建、不覆寫（啟動期間被他人先建立即拒絕啟動）。權限：POSIX 為 0600，Windows 依資料夾 ACL</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>enableEvaluate</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Boolean</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>false</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>是否開啟 <code>POST /chrome/evaluate</code>（任意 JS 執行），優先序：opt.enableEvaluate &gt; env SCREENCTL_ENABLE_EVALUATE（1/true/yes/on）&gt; 關閉</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>enableSystem</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Boolean</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>true</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>是否開啟系統級端點（<code>/screenshot</code>、<code>/mouse/*</code>、<code>/keyboard/*</code>；操控真實桌面），優先序：opt.enableSystem &gt; env SCREENCTL_ENABLE_SYSTEM（0/false/no/off 關閉）&gt; 開啟。關閉時這 7 條端點回 403 <code>SYSTEM_DISABLED</code>（須先通過 token 驗證）並記入操作紀錄；<code>/chrome/*</code>（含頁面級滑鼠鍵盤）不受影響</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>auditLog</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Boolean</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>true</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>是否寫操作紀錄，優先序：opt.auditLog &gt; env SCREENCTL_AUDIT_LOG &gt; 開啟。關閉時啟動輸出會印警告</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>auditLogFile</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>操作紀錄檔路徑，優先序：opt.auditLogFile &gt; env SCREENCTL_AUDIT_LOG_FILE &gt; <code>&lt;家目錄&gt;/.w-screenctl/audit-&lt;port&gt;.jsonl</code>（與 token 檔同目錄；host 非預設時為 <code>audit-&lt;host&gt;-&lt;port&gt;.jsonl</code>）。檔案於首次寫入才建立；POSIX 為 0600（目錄 0700）。一個紀錄檔請只給一個實例寫入</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>auditLogMaxBytes</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Integer</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>5242880</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>單一紀錄檔上限（位元組，1024~1073741824），優先序：opt.auditLogMaxBytes &gt; env SCREENCTL_AUDIT_LOG_MAX_BYTES。超過即輪替</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>auditLogKeep</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Integer</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>5</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>輪替保留份數（0~100；<code>audit.jsonl.1</code> 為最新的舊檔），優先序：opt.auditLogKeep &gt; env SCREENCTL_AUDIT_LOG_KEEP。總量上限約 (keep + 1) × auditLogMaxBytes；0＝不留舊檔</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>allowedOrigins</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;String></span>
+|
+
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>[]</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>允許跨站呼叫之 Origin 白名單（<code>scheme://host[:port]</code>，可為陣列或逗號分隔字串，元素須為字串；不接受 <code>*</code>、<code>null</code>、含路徑者，並正規化成瀏覽器送出之 Origin 表示法），優先序：opt.allowedOrigins &gt; env SCREENCTL_ALLOWED_ORIGINS。預設空＝帶 Origin 之請求一律 403 且不輸出 CORS 標頭</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>backend</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>進階／測試用：以替身取代系統級後端（須提供 screenshot、mouseClick、mouseDblClick、mouseDrag、mouseScroll、keyboardKey、keyboardType、getMemoryInfo）；預設依平台使用 bkWin／bkLinux</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>chromeManager</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>進階／測試用：以替身取代 Chrome 管理器（須提供 isOpen、snapshot、withPage、open、close、shutdown）；預設使用內建 ChromeManager</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>allowedHosts</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;String></span>
+|
+
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>[]</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>額外允許之 Host 標頭主機名稱（例：反向代理之對外名稱），優先序：opt.allowedHosts &gt; env SCREENCTL_ALLOWED_HOSTS。綁迴路位址時另內建 localhost、127.0.0.1、[::1]；綁非迴路位址且未設時不檢查 Host</p></td>
+        </tr>
+
+    
     </tbody>
 </table>
 
@@ -496,6 +1024,3191 @@ chromeState-tagged Error 給 errResponse 統一處理。</p>
 
 
         
+            
+
+    
+
+    <h4 class="name" id="buildAuditEntry"><span class="type-signature"></span>buildAuditEntry<span class="signature">(request)</span><span class="type-signature"> &rarr; {Object|null}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>由 Hapi request（於 response 事件時）組出一筆紀錄；不該記的請求回傳 null</p>
+<p>記：被閘門拒絕者（任何端點，含未註冊路徑與 /health）；已註冊且非公開之路由（成功、驗證失敗、handler 失敗皆記）
+不記：公開路由成功（/health）、未註冊路徑之 404、預檢成功</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="auditLog.mjs.html">auditLog.mjs</a>, <a href="auditLog.mjs.html#line237">line 237</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>request</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>Hapi request</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Object</span>
+|
+
+<span class="param-type">null</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="checkBearer"><span class="type-signature"></span>checkBearer<span class="signature">(authorization, expectedDigest)</span><span class="type-signature"> &rarr; {Boolean}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>檢查 Authorization 標頭之 Bearer token（定時比較）</p>
+<p>兩邊先各自雜湊成等長摘要再 timingSafeEqual，長度與內容皆不影響比較時間；
+格式不符時仍做一次比較，避免以回應時間分辨「格式錯」與「值錯」。</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line404">line 404</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>authorization</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>Authorization 標頭值</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>expectedDigest</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Buffer</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>正確 token 之 sha256 摘要</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Boolean</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="createAuditLogger"><span class="type-signature"></span>createAuditLogger<span class="signature">(cfg, deps<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {Object}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>建立紀錄寫入器：同步 append（一筆一行，不交錯）、超過 maxBytes 即輪替（保留 keep 份舊檔）；
+任何寫檔失敗都不丟例外（不得使請求失敗），連續失敗只警告一次，恢復成功後再失敗才再警告</p>
+<ul>
+<li>檔案於首次寫入才建立（目錄 0700、檔案 0600，POSIX；既有檔案若權限寬於 0600 會於首次寫入後收緊，既有目錄不改）</li>
+<li>每次寫入前重新取得實際檔案大小（不快取）：部分寫入、外部截斷、同檔多寫入者都不會讓上限失準</li>
+<li>輪替：先把目前檔改名為暫存檔（此步失敗時其他檔都沒動，之後可重試），再 <code>file.(keep-1)</code>→<code>file.keep</code>…，最後暫存檔→<code>file.1</code>；中途失敗會把目前檔還原。
+<code>keep=0</code> 則超過上限即清掉重寫。首次寫入時順便刪除超過 keep 份之舊輪替檔（調降保留份數後會收斂）。輪替失敗時丟棄新紀錄，使檔案維持有界</li>
+<li>單筆即超過上限者仍完整寫入（不拆行、不丟棄）。調降 maxBytes 後，既有的較大舊檔不會被截斷，隨輪替自然汰換</li>
+<li>append 失敗（可能留下半行）後，下一筆前置換行，使該筆仍可獨立解析</li>
+<li><code>redact</code>：目前的 token 等機密全文；寫入前會自序列化後的整行清除（含 JSON 跳脫形式），不論它經由哪個載體進到紀錄項
+一個紀錄檔請只給一個實例寫入（預設檔名含 port 與非預設位址）。</li>
+</ul></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="auditLog.mjs.html">auditLog.mjs</a>, <a href="auditLog.mjs.html#line311">line 311</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>cfg</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last">
+                <h6>Properties</h6>
+                
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>file</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+
+            <td class="description last"><p>紀錄檔絕對路徑</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>maxBytes</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Integer</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+
+            <td class="description last"><p>單檔上限（位元組）</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>keep</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Integer</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+
+            <td class="description last"><p>輪替保留份數</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>redact</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Array.&lt;String></span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+
+            <td class="description last"><p>須自紀錄中清除之機密全文</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+            </td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>deps</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>{}</code>
+                
+                </td>
+            
+
+            <td class="description last">
+                <h6>Properties</h6>
+                
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>fsApi</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>fs</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>檔案系統實作（測試注入故障用）</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>warn</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">function</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>警告輸出，預設 console.warn</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>platform</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>process.platform</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>平台（決定是否收緊既有檔案權限）</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+            </td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Object</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="createGate"><span class="type-signature"></span>createGate<span class="signature">(cfg)</span><span class="type-signature"> &rarr; {Object}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>建立 Hapi 閘門</p>
+<p>onRequest（先於路由比對，涵蓋所有請求含 404 與 CORS 預檢）：</p>
+<ul>
+<li>Host 標頭須在白名單（綁迴路時為本機名稱）→ 擋 DNS rebinding</li>
+<li>帶 Origin 之請求須在 allowedOrigins（預設空＝一律拒絕）→ 擋跨站
+onPreAuth（路由比對後，先於 payload 解析與 Joi 驗證）：</li>
+<li>options.app.public === true 之路由（目前僅 GET /health）免 token</li>
+<li>其餘一律須 Bearer token（預設拒絕，不特別放行任何 method）</li>
+<li>options.app.feature === 'evaluate' 且 evaluate 未開啟 → 403 EVALUATE_DISABLED</li>
+<li>options.app.feature === 'system' 且系統級關閉（enableSystem=false）→ 403 SYSTEM_DISABLED
+每次拒絕都把原因碼記在 request.app.denied（操作紀錄用）
+注意：Hapi 內建之 notFound 與 CORS 預檢（OPTIONS）特殊路由不經 onPreAuth（server.ext 於建立後才註冊，
+不會重建特殊路由之生命週期；api-security 之預檢測試鎖定此行為）。預檢因此不需 token，且已受 onRequest 的 Origin／Host 檢查；
+它只回 CORS 標頭，不執行任何 handler。</li>
+</ul></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line430">line 430</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>cfg</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>resolveSecurity 之回傳</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Object</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="defaultAuditFile"><span class="type-signature"></span>defaultAuditFile<span class="signature">(port, host<span class="signature-attributes">opt</span>, homedir<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {String}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>預設之操作紀錄檔位置：與 token 檔同目錄，<code>&lt;使用者家目錄&gt;/.w-screenctl/audit-&lt;port&gt;.jsonl</code>（非預設位址為 <code>audit-&lt;位址&gt;-&lt;port&gt;.jsonl</code>）</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line196">line 196</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>port</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Integer</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>服務 port</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>host</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>'127.0.0.1'</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>監聽位址</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>homedir</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">function</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>os.homedir</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>取得家目錄之函式</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">String</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="defaultTokenFile"><span class="type-signature"></span>defaultTokenFile<span class="signature">(port, host<span class="signature-attributes">opt</span>, homedir<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {String}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>預設之 token 檔位置：預設位址為 <code>&lt;使用者家目錄&gt;/.w-screenctl/token-&lt;port&gt;</code>，
+其他位址為 <code>token-&lt;位址&gt;-&lt;port&gt;</code>（位址中非英數與 <code>.-</code> 者換成 <code>_</code>），避免同 port 不同位址之實例共用同一檔而互相覆寫</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line178">line 178</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>port</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Integer</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>服務 port</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>host</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>'127.0.0.1'</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>監聽位址</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>homedir</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">function</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>os.homedir</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>取得家目錄之函式</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">String</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="describeSecurity"><span class="type-signature"></span>describeSecurity<span class="signature">(cfg)</span><span class="type-signature"> &rarr; {Object}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>啟動後輸出之安全摘要（不含 token 全文）</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line494">line 494</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>cfg</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>resolveSecurity 之回傳</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Object</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="isLoopbackHost"><span class="type-signature"></span>isLoopbackHost<span class="signature">(host)</span><span class="type-signature"> &rarr; {Boolean}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>判斷監聽位址是否為迴路位址（僅本機可連入）</p>
+<p>保守判定：認不得之寫法一律視為非迴路（須 token 才能啟動）</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line146">line 146</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>host</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>監聽位址</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Boolean</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="parseHostHeader"><span class="type-signature"></span>parseHostHeader<span class="signature">(v)</span><span class="type-signature"> &rarr; {String|null}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>解析 Host 標頭，回傳小寫之主機名稱（IPv6 保留中括號），格式不合回傳 null</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line163">line 163</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>v</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>Host 標頭值</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">String</span>
+|
+
+<span class="param-type">null</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="persistToken"><span class="type-signature"></span>persistToken<span class="signature">(file, token, opt<span class="signature-attributes">opt</span>)</span><span class="type-signature"></span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>寫出 token 檔：目錄 0700、檔案 0600（POSIX）；一律先寫同目錄暫存檔（獨佔建立）再一次到位，不會留下半寫入之檔，失敗時暫存檔會清除</p>
+<ul>
+<li>replace=true（預設；伺服器自有之預設路徑）：rename 原子取代，失敗時舊檔原封不動</li>
+<li>replace=false（使用者明指之 tokenFile）：原子建立，目標已存在（例如另一實例搶先寫入）即丟 EEXIST，絕不覆寫
+Windows 之 mode 位元無作用，權限取決於所在資料夾之 ACL（使用者家目錄預設僅本人／系統管理者可讀）</li>
+</ul></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line212">line 212</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>file</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>token 檔路徑</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>token</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                </td>
+            
+
+            <td class="description last"><p>token 全文</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>opt</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>{}</code>
+                
+                </td>
+            
+
+            <td class="description last">
+                <h6>Properties</h6>
+                
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>replace</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Boolean</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>true</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>目標已存在時是否取代</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>fsApi</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>fs</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>檔案系統實作（測試注入故障用）</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+            </td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="redactKeys"><span class="type-signature"></span>redactKeys<span class="signature">(keys)</span><span class="type-signature"> &rarr; {String}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>鍵名遮蔽：已知的具名鍵與快捷鍵（<code>Enter</code>、<code>F5</code>、<code>ctrl+a</code>）原樣記；
+單一可印字元（可能是以逐鍵方式輸入之密碼）只記 <code>&lt;char&gt;</code>（含 shift 等非快捷修飾鍵者亦同：shift+7 → shift+<char>）；
+不是已知鍵名之其他字串（例如被誤送進來的整段文字）只記 <code>&lt;key&gt;</code></p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="auditLog.mjs.html">auditLog.mjs</a>, <a href="auditLog.mjs.html#line108">line 108</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>keys</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>鍵名或組合鍵</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">String</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="resolveSecurity"><span class="type-signature"></span>resolveSecurity<span class="signature">(opt<span class="signature-attributes">opt</span>, env<span class="signature-attributes">opt</span>, ctx<span class="signature-attributes">opt</span>)</span><span class="type-signature"> &rarr; {Object}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>解析並驗證安全設定；設定有誤或不安全時丟出 code='SCREENCTL_CONFIG' 之 Error（拒絕啟動）</p>
+<p>優先序（新增之安全選項）：選項 &gt; 環境變數 &gt; 預設
+副作用：只讀取 token 檔，不寫檔（寫檔由呼叫端於 server 啟動成功後以 persistToken 執行）</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="security.mjs.html">security.mjs</a>, <a href="security.mjs.html#line269">line 269</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+        <th>Default</th>
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>opt</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>{}</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>同 WScreenctl 之 opt</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>env</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>process.env</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>環境變數</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>ctx</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+                <td class="default">
+                
+                    <code>{}</code>
+                
+                </td>
+            
+
+            <td class="description last"><p>內部用</p>
+                <h6>Properties</h6>
+                
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+        <th>Attributes</th>
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>port</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Integer</span>
+
+
+
+            
+            </td>
+
+            
+                <td class="attributes">
+                
+                    &lt;optional><br>
+                
+
+                
+
+                
+                </td>
+            
+
+            
+
+            <td class="description last"><p>服務 port（決定預設 token 檔名）</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+            </td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+<div class="param-desc">
+    <p>設定：host, loopback, token, tokenSource, tokenFile, persist, persistReplace, evaluate, enableSystem, audit({enabled,file,maxBytes,keep}), allowedOrigins, allowedHosts, hostSet, cors</p>
+</div>
+
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Object</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="stripUrl"><span class="type-signature"></span>stripUrl<span class="signature">(u)</span><span class="type-signature"> &rarr; {String}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>網址去除查詢字串、片段與帳密，只留 協定／主機／port／路徑（任何協定皆然，含 about:// 這類帶 authority 之寫法）</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="auditLog.mjs.html">auditLog.mjs</a>, <a href="auditLog.mjs.html#line43">line 43</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>u</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>網址</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+<div class="param-desc">
+    <p>無法解析回傳 <code>&lt;invalid&gt;</code></p>
+</div>
+
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">String</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
+            
+
+    
+
+    <h4 class="name" id="summarizeParams"><span class="type-signature"></span>summarizeParams<span class="signature">(method, routePath, payload)</span><span class="type-signature"> &rarr; {Object}</span></h4>
+
+    
+
+
+
+
+<dl class="details">
+    
+    <dt class="tag-description">Description:</dt>
+    <dd class="tag-description"><ul class="dummy"><li><p>依端點產生「不含機敏內容」之參數摘要</p></li></ul></dd>
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="auditLog.mjs.html">auditLog.mjs</a>, <a href="auditLog.mjs.html#line185">line 185</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <h5 class="h5-parameters">Parameters:</h5>
+    
+
+<table class="params">
+    <thead>
+    <tr>
+        
+        <th>Name</th>
+        
+
+        <th>Type</th>
+
+        
+
+        
+
+        <th class="last">Description</th>
+    </tr>
+    </thead>
+
+    <tbody>
+    
+
+        <tr>
+            
+                <td class="name"><code>method</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>HTTP 方法</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>routePath</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">String</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>路由路徑</p></td>
+        </tr>
+
+    
+
+        <tr>
+            
+                <td class="name"><code>payload</code></td>
+            
+
+            <td class="type">
+            
+                
+<span class="param-type">Object</span>
+
+
+
+            
+            </td>
+
+            
+
+            
+
+            <td class="description last"><p>已通過驗證之 payload</p></td>
+        </tr>
+
+    
+    </tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<h5 class="h5-returns">Returns:</h5>
+
+        
+
+
+<dl class="param-type">
+    <dt>
+        Type
+    </dt>
+    <dd>
+        
+<span class="param-type">Object</span>
+
+
+
+    </dd>
+</dl>
+
+    
+
+
+
+        
     
 
     
@@ -515,7 +4228,7 @@ chromeState-tagged Error 給 errResponse 統一處理。</p>
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 4.0.5</a> on Tue Oct 20 2026 04:02:48 GMT+0800 (台北標準時間) using the <a href="https://github.com/clenemt/docdash">docdash</a> theme.
+    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 4.0.5</a> on Wed Oct 28 2026 00:07:49 GMT+0800 (台北標準時間) using the <a href="https://github.com/clenemt/docdash">docdash</a> theme.
 </footer>
 
 <script>prettyPrint();</script>
