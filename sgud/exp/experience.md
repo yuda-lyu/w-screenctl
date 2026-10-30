@@ -44,5 +44,6 @@
 - **稽核紀錄的同步點=Hapi `response` 事件**:podium 同步、依註冊順序呼叫,稽核監聽器先註冊且同步 append,故測試端掛在其後的監聽器被呼叫時,檔案已是最終狀態(探測實測:tap 事件發生時 `lines` 已含該筆;404／成功預檢不寫、被拒預檢寫).「不該有」類斷言因此不需觀察窗.限制:若稽核寫入器日後改非同步,此同步點失效,須先在 src 加寫入完成回調.
 - **子行程的紀錄檔用 `fs.watch` 等行數**(`test/tools/fileWait.mjs`):先建監看再檢查,看門狗逾時時若檔案其實已達標,訊息會註明「fs.watch 未通知」,以便辨識監看漏報.
 - **`mock.timers` 只假造 `Date` 即可驗「耗時 ms」**:Hapi 以 `Date.now()` 記 `received`／`responded`,handler 以閘門停住、測試推進 250 ms 後放行 → `ms === 250`;socket 逾時、看門狗等真實計時器不受影響(看門狗須用模組載入時保存之 `setTimeout`).
-- **`loadPreload` 的環境變數不可用 `SCREENCTL_` 開頭**:`api-security-g` 的 `cleanEnv` 與 `apiHarness.clearEnv` 會清掉 `SCREENCTL_*`,子行程(`node g.mjs`)就收不到負載;改 `LT_LAG`／`LT_PROBE`.
+- **`loadPreload` 的環境變數不可用 `SCREENCTL_` 開頭**:`api-security-g` 的 `cleanEnv` 與 `apiHarness.clearEnv` 會清掉 `SCREENCTL_*`,子行程(`node g.mjs`)就收不到負載;故不用 `SCREENCTL_`.
+- **負載執行器來源與環境變數(2026-10-30 起)**:`test/tools/loadTrial.mjs`＋`loadPreload.mjs` 自 wsemi(≥1.9.33)`test/tools/` **兩檔同時整份複製**,不各自修改(原複製自 w-mousekey、環境變數 `LT_*`,已汰換);環境變數統一 `WSEMI_LT_LAG`／`WSEMI_LT_PROBE`／`WSEMI_LT_DIAG`,測試之清環境變數處只清 `SCREENCTL_*`／`PORT`／`CHROME_USER_DATA`,不會清掉 `WSEMI_LT_*`.升版時以 `cmp node_modules/wsemi/test/tools/loadTrial.mjs test/tools/loadTrial.mjs`(與 `loadPreload.mjs`)驗位元組全等.與舊版差異:不退出失敗鍵 `(mocha did not exit)`;`--run-max` 預設 900 秒(單次逾 15 分須明給 `--run-max 0` 或更大值);`--exit-grace` 即 `--hang-sec`.
 - **`momo.e2e` 含於 `npm test` 的 glob**(`test/*.test.mjs`),會開有頭 Chrome 並連外網;跑全套前先確認桌面無人操作(`quser` 的閒置時間),否則排除該檔另跑.
