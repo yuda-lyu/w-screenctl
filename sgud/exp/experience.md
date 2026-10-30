@@ -25,7 +25,7 @@
 
 - **寫紀錄用 Hapi `response` 事件,不用 `onPreResponse`**:被 `onRequest` 接管(Origin／Host 拒絕)與 notFound／預檢特殊路由的請求,路由層擴充點(`onPreAuth`、`onPreResponse`)不會執行(server.ext 於建立後才註冊,不重建特殊路由的生命週期),只有 `server.events.on('response')` 對所有請求都觸發.拒絕原因由閘門寫在 `request.app.denied`,事件處理函式讀它.
 - **參數摘要在 `onPreHandler` 取**(驗證之後):驗證失敗(400)的請求不會走到,因此不會把格式錯誤的 payload 記進去;被閘門攔下的請求也沒有摘要.
-- **回應送出後才寫檔**:客戶端先收到回應、紀錄稍後才落檔,測試要輪詢紀錄檔等行數,不可固定 sleep;「不應有紀錄」的斷言則要先等一小段(300ms)再數.
+- **回應送出後才寫檔**:客戶端可能先收到回應、紀錄才落檔;**測試不得 sleep 或輪詢紀錄檔**(2026-10-30 起,見文末〈計時器相關測試〉):in-process 用 `test/tools/respTap.mjs` 等伺服器端 `response` 事件,子行程用 `test/tools/fileWait.mjs` 等 `fs.watch` 通知.「不應有紀錄」亦以事件序界定,不再用 300 ms 觀察窗.
 - **單一字元鍵(逐鍵輸入密碼)的處理**:`/keyboard/key` 若逐字送密碼,鍵名本身就是密碼;規則:具名鍵與含 ctrl／alt／super／meta 的快捷鍵原樣記,其餘單一可印字元記 `<char>`.
 - **紀錄寫入器的邊界**:延遲到首次寫入才建立目錄(建立 logger 與 bootRoutes 類測試不留檔);ENOENT 重建目錄重試一次;**每次寫入前都 `stat` 實際檔案大小,不快取**(外審 #7:快取在部分寫入失敗、兩個 logger 共檔、外部截斷時都會失準,實測 100 次部分寫入長到 11690 bytes);輪替失敗時丟棄而非繼續 append(有界優先於完整);單筆超大不拆行;`append` 部分成功後失敗要記 `dirty`,下一筆以 `\n` 開頭,否則連下一筆成功的紀錄也無法解析.連續失敗只警告一次,恢復後才再警告.
 - **輪替要可還原**:先把目前檔改名到 `.rotating`(此步最常因檔案被占用而失敗,此時其他備份都還沒動),再 `.keep-1`→`.keep`、`.rotating`→`.1`;中途失敗把 `.rotating` 改回目前檔.反覆失敗不會吃掉歷史(外審 #11).
@@ -37,3 +37,12 @@
 - **覆寫 USERPROFILE 會讓 Playwright 啟動 Chrome 逾時**(`launchPersistentContext timeout 20000ms`,2026-10-26 實測):會啟動真 Chrome 的場景(L5 驗收)不要覆寫 HOME／USERPROFILE,改以 `SCREENCTL_TOKEN_FILE`、`SCREENCTL_AUDIT_LOG_FILE` 明指到 `tmp`;不啟動 Chrome 的測試／變異才覆寫.兩種做法都要在結束時核對 `~/.w-screenctl` 不存在.
 - **系統級端點的測試安全**:變異可能拿掉 `SYSTEM_DISABLED` 判斷,故任何會對「真實 g 子行程」送系統級請求的測試只用 `/screenshot`(唯讀);鍵鼠請求一律走 `opt.backend` 替身;Chrome 請求走 `opt.chromeManager` 替身(含 `/chrome/open`,避免啟動真 Chrome).
 - **MaxListenersExceededWarning**:`WScreenctl` 每個實例對 `process` 掛 SIGTERM/SIGINT `once` 監聽且 `stop()` 不移除(既有行為,未改);同一行程起超過 10 個實例的測試需 `process.setMaxListeners`.
+
+## 計時器相關測試(2026-10-30 tm-screenctl;規則見 rulebook〈TM-xx〉)
+
+- **探測先於設計**:原以為「客戶端中途斷線,Hapi 會在斷線當下發 `response` 事件」,以 `tmp` 探測腳本實測為否——**請求本體已收完之斷線,Hapi 不發事件,`response` 要等 handler 完成才來**(Node 24 + @hapi/hapi 21.4.9).因此「已斷線」改由伺服器端 `socket.once('close')` 界定,不能拿 response 事件當斷線訊號.凡設計事件閘門,先用探測腳本印出事件的實際先後與時刻.
+- **稽核紀錄的同步點=Hapi `response` 事件**:podium 同步、依註冊順序呼叫,稽核監聽器先註冊且同步 append,故測試端掛在其後的監聽器被呼叫時,檔案已是最終狀態(探測實測:tap 事件發生時 `lines` 已含該筆;404／成功預檢不寫、被拒預檢寫).「不該有」類斷言因此不需觀察窗.限制:若稽核寫入器日後改非同步,此同步點失效,須先在 src 加寫入完成回調.
+- **子行程的紀錄檔用 `fs.watch` 等行數**(`test/tools/fileWait.mjs`):先建監看再檢查,看門狗逾時時若檔案其實已達標,訊息會註明「fs.watch 未通知」,以便辨識監看漏報.
+- **`mock.timers` 只假造 `Date` 即可驗「耗時 ms」**:Hapi 以 `Date.now()` 記 `received`／`responded`,handler 以閘門停住、測試推進 250 ms 後放行 → `ms === 250`;socket 逾時、看門狗等真實計時器不受影響(看門狗須用模組載入時保存之 `setTimeout`).
+- **`loadPreload` 的環境變數不可用 `SCREENCTL_` 開頭**:`api-security-g` 的 `cleanEnv` 與 `apiHarness.clearEnv` 會清掉 `SCREENCTL_*`,子行程(`node g.mjs`)就收不到負載;改 `LT_LAG`／`LT_PROBE`.
+- **`momo.e2e` 含於 `npm test` 的 glob**(`test/*.test.mjs`),會開有頭 Chrome 並連外網;跑全套前先確認桌面無人操作(`quser` 的閒置時間),否則排除該檔另跑.

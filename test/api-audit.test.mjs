@@ -3,6 +3,11 @@
 // 直打真實 Hapi server（真 port、真 HTTP）。系統級後端與 Chrome 以替身注入（opt.backend、opt.chromeManager），
 // 因此不會操作真實桌面、也不會啟動 Chrome。紀錄檔一律寫在 test/_tmp/api-audit/（HOME／USERPROFILE 亦指到該處），
 // 絕不寫入真實使用者目錄。每條斷言之 Axx 對應 sgud/rule/rulebook.md 之 AUD-xx 規則。
+//
+// 同步方式（計時器相關測試規範，sgud/rule/rulebook.md〈TM-01〉）：不 sleep、不輪詢紀錄檔。
+// 紀錄於 Hapi 'response' 事件由稽核寫入器同步 append；tapResponses 掛在其後的監聽器被呼叫時，該請求之紀錄「已寫入或確定不會寫入」，
+// 所以每個請求以 tap.request() 送出（等到伺服器端 response 事件才返回），之後立刻讀紀錄檔即是最終狀態；
+// 「不該有紀錄」「不該多一筆」由事件序判定，不需要觀察窗。看門狗上限（真實計時器）只防事件永不來。
 
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
@@ -10,9 +15,11 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { mock } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { rawRequest } from './tools/rawHttp.mjs'
 import { makeHarness } from './tools/apiHarness.mjs'
+import { tapResponses, deferred, guard } from './tools/respTap.mjs'
 
 const fdTest = path.dirname(fileURLToPath(import.meta.url))
 const fdTmp = path.join(fdTest, '_tmp', 'api-audit')
@@ -125,19 +132,7 @@ function makeChrome(calls, state = { open: true }) {
 }
 
 const readLines = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter((x) => x !== '') : [])
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-// 紀錄於回應送出「之後」才寫（Hapi response 事件），故以輪詢等到行數足夠
-async function waitLines(f, n, ms = 4000) {
-    const t0 = Date.now()
-    while (Date.now() - t0 < ms) {
-        if (readLines(f).length >= n) break
-        await sleep(20)
-    }
-    const got = readLines(f)
-    assert.ok(got.length >= n, `${f} 只有 ${got.length} 行，預期至少 ${n}`)
-    return got.map((x) => JSON.parse(x))
-}
+const readEntries = (f) => readLines(f).map((x) => JSON.parse(x))
 
 describe('api-audit：操作紀錄與系統級開關', function() {
     this.timeout(60000)
@@ -195,8 +190,10 @@ describe('api-audit：操作紀錄與系統級開關', function() {
         ]
 
         let srv
+        let tap
         before(async () => {
             srv = await H.start({ port: P_ALL, enableEvaluate: true, auditLogFile: f, backend: makeBackend(bCalls), chromeManager: makeChrome(cCalls) })
+            tap = tapResponses(srv)
             t0 = Date.now() - 1000
         })
 
@@ -211,10 +208,10 @@ describe('api-audit：操作紀錄與系統級開關', function() {
         it('A01 全部 19 條控制路由（系統級 7、Chrome 12；共 24 次呼叫，含同路由之不同參數）各產生恰一筆；欄位集合、型別與參數摘要皆正確', async () => {
             let n = 0
             for (const [method, p, body, params] of CASES) {
-                const r = await rawRequest({ port: P_ALL, method, path: p, body, headers: auth() })
+                const r = await tap.request({ port: P_ALL, method, path: p, body, headers: auth() })
                 assert.equal(r.status, 200, `${method} ${p}`)
                 n++
-                const all = await waitLines(f, n)
+                const all = readEntries(f)
                 assert.equal(all.length, n, `${method} ${p} 應只新增一筆`)
                 const e = all[n - 1]
                 assert.equal(e.method, method)
@@ -224,13 +221,13 @@ describe('api-audit：操作紀錄與系統級開關', function() {
                 assert.equal(e.ok, true, `${method} ${p} ok（含 GET /chrome：回應本體無 ok 欄位，以 HTTP 狀態推導）`)
                 assert.equal(new Date(e.ts).toISOString(), e.ts, 'ts 須為 ISO')
                 assert.ok(Date.parse(e.ts) >= t0 && Date.parse(e.ts) <= Date.now() + 1000, `ts 範圍 ${e.ts}`)
-                assert.ok(Number.isFinite(e.ms) && e.ms >= 0 && e.ms < 5000, `ms=${e.ms}`)
+                assert.ok(Number.isFinite(e.ms) && e.ms >= 0, `ms=${e.ms}`) // ms 之數值語意由「耗時（ms）」案以假時鐘驗；此處不設牆鐘上限（負載下會誤報）
                 assert.equal(e.denied, undefined)
                 assert.deepEqual(e.params, params, `${method} ${p} params`)
                 assert.deepEqual(Object.keys(e).sort(), ['ip', 'method', 'ms', 'ok', 'params', 'path', 'status', 'ts'], `${method} ${p} 不得有多餘欄位`)
             }
-            await sleep(300) // 若有重複寫入，此時應已出現
-            assert.equal(readLines(f).length, CASES.length)
+            assert.equal(tap.seen, CASES.length)
+            assert.equal(readLines(f).length, CASES.length) // 每個請求之 response 事件都已過；若有重複寫入，此刻必已出現
             assert.equal(new Set(CASES.map(([m, p]) => `${m} ${p}`)).size, 19, '應涵蓋全部 19 條控制路由')
         })
 
@@ -263,64 +260,82 @@ describe('api-audit：操作紀錄與系統級開關', function() {
 
         it('A01 不記：GET /health（公開）、未註冊路徑 404、預檢成功之外的無關請求；HEAD 以 HEAD 記', async () => {
             const before = readLines(f).length
-            assert.equal((await rawRequest({ port: P_ALL, path: '/health' })).status, 200)
-            assert.equal((await rawRequest({ port: P_ALL, path: '/no/such/route', headers: auth() })).status, 404)
-            await sleep(300)
-            assert.equal(readLines(f).length, before, '/health 與 404 不應產生紀錄')
-            assert.equal((await rawRequest({ port: P_ALL, method: 'HEAD', path: '/chrome', headers: auth() })).status, 200)
-            const all = await waitLines(f, before + 1)
+            assert.equal((await tap.request({ port: P_ALL, path: '/health' })).status, 200)
+            assert.equal((await tap.request({ port: P_ALL, path: '/no/such/route', headers: auth() })).status, 404)
+            assert.equal(readLines(f).length, before, '/health 與 404 不應產生紀錄') // 兩者之 response 事件皆已過（稽核監聽器先於 tap 執行）：判定不寫，不需觀察窗
+            assert.equal((await tap.request({ port: P_ALL, method: 'HEAD', path: '/chrome', headers: auth() })).status, 200)
+            const all = readEntries(f)
+            assert.equal(all.length, before + 1)
             assert.equal(all[before].method, 'HEAD')
             assert.equal(all[before].path, '/chrome')
         })
 
         it('A01 驗證失敗（400）：記 status／code，但不記任何 payload 內容', async () => {
             const before = readLines(f).length
-            const r = await rawRequest({ port: P_ALL, method: 'POST', path: '/chrome/navigate', body: { url: 'https://example.com/x', zzz: 'LEAK-VALIDATION' }, headers: auth() })
+            const r = await tap.request({ port: P_ALL, method: 'POST', path: '/chrome/navigate', body: { url: 'https://example.com/x', zzz: 'LEAK-VALIDATION' }, headers: auth() })
             assert.equal(r.status, 400)
-            const all = await waitLines(f, before + 1)
+            const all = readEntries(f)
+            assert.equal(all.length, before + 1, '驗證失敗應恰一筆')
             const e = all[before]
             assert.equal(e.status, 400)
             assert.equal(e.ok, false)
             assert.equal(e.code, 'VALIDATION')
             assert.equal(e.params, undefined)
             assert.ok(!JSON.stringify(e).includes('LEAK-VALIDATION'))
-            await sleep(300)
-            assert.equal(readLines(f).length, before + 1, '驗證失敗應恰一筆')
         })
 
         it('A01 來源 IP 取 socket 位址：偽造的 X-Forwarded-For／X-Real-IP／Forwarded 不影響紀錄', async () => {
             const before = readLines(f).length
-            const r = await rawRequest({ port: P_ALL, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: { ...auth(), 'x-forwarded-for': '6.6.6.6', 'x-real-ip': '7.7.7.7', 'forwarded': 'for=8.8.8.8' } })
+            const r = await tap.request({ port: P_ALL, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: { ...auth(), 'x-forwarded-for': '6.6.6.6', 'x-real-ip': '7.7.7.7', 'forwarded': 'for=8.8.8.8' } })
             assert.equal(r.status, 200)
-            const all = await waitLines(f, before + 1)
+            const all = readEntries(f)
+            assert.equal(all.length, before + 1)
             assert.equal(all[before].ip, '127.0.0.1')
             assert.ok(!JSON.stringify(all[before]).includes('6.6.6.6'))
         })
 
         it('A01 公開路由：HEAD /health 成功不記；被拒絕之 HEAD（無 token）記為 HEAD', async () => {
             const before = readLines(f).length
-            assert.equal((await rawRequest({ port: P_ALL, method: 'HEAD', path: '/health' })).status, 200)
-            await sleep(300)
+            assert.equal((await tap.request({ port: P_ALL, method: 'HEAD', path: '/health' })).status, 200)
             assert.equal(readLines(f).length, before)
-            assert.equal((await rawRequest({ port: P_ALL, method: 'HEAD', path: '/chrome' })).status, 401)
-            const all = await waitLines(f, before + 1)
+            assert.equal((await tap.request({ port: P_ALL, method: 'HEAD', path: '/chrome' })).status, 401)
+            const all = readEntries(f)
+            assert.equal(all.length, before + 1)
             assert.equal(all[before].method, 'HEAD')
             assert.equal(all[before].denied, 'UNAUTHORIZED')
         })
 
-        it('A01 耗時（ms）反映實際處理時間：handler 延遲 250 ms → 紀錄之 ms 至少 200', async () => {
+        it('A01 耗時（ms）反映實際處理時間：handler 歷時 250 ms（假時鐘）→ 紀錄之 ms 恰為 250', async () => {
+            // 時間本身是規格：以 node:test 的 mock.timers 只假造 Date，handler 以閘門停住，測試端把虛擬時間推進 250 ms 後才放行；
+            // 因此 ms 為確定值，不受負載影響（舊作法：真實 sleep(250) 後斷言 200 <= ms < 3000，上界在重度阻塞下會誤報）
             const f2 = path.join(fdTmp, 'slow.jsonl')
+            const started = deferred()
+            const gate = deferred()
             const slow = {
                 ...makeBackend([]),
                 mouseDblClick: async () => {
-                    await sleep(250)
+                    started.resolve()
+                    await gate.promise
                 }
             }
             const s = await H.start({ port: P_PAR + 101, auditLogFile: f2, backend: slow, chromeManager: makeChrome([]) })
-            const r = await rawRequest({ port: P_PAR + 101, method: 'POST', path: '/mouse/dblclick', body: { x: 1, y: 2 }, headers: auth() })
-            assert.equal(r.status, 200)
-            const [e] = await waitLines(f2, 1)
-            assert.ok(e.ms >= 200 && e.ms < 3000, `ms=${e.ms}`)
+            const tap2 = tapResponses(s)
+            mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-01-01T00:00:00.000Z') })
+            try {
+                const pending = tap2.request({ port: P_PAR + 101, method: 'POST', path: '/mouse/dblclick', body: { x: 1, y: 2 }, headers: auth() })
+                await guard(started.promise, 'handler 未啟動')
+                mock.timers.tick(250)
+                gate.resolve()
+                const r = await pending
+                assert.equal(r.status, 200)
+            }
+            finally {
+                mock.timers.reset()
+            }
+            const all = readEntries(f2)
+            assert.equal(all.length, 1)
+            assert.equal(all[0].ms, 250, `ms=${all[0].ms}`)
+            assert.equal(all[0].ts, '2026-01-01T00:00:00.000Z', 'ts 為請求到達時刻（假時鐘起點）')
             await H.stop(s)
         })
 
@@ -332,15 +347,15 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             const chrome = { ...makeChrome([]), open: async () => boom(), close: async () => boom() }
             const backend = { ...makeBackend([]), mouseClick: async () => boom() }
             const s = await H.start({ port: P_PAR + 102, auditLogFile: f2, backend, chromeManager: chrome })
+            const tap2 = tapResponses(s)
             const calls = [['POST', '/mouse/click', { x: 3, y: 4 }], ['POST', '/chrome/open', { url: 'https://example.com/z?k=v' }], ['DELETE', '/chrome', undefined]]
             for (const [m, p, body] of calls) {
-                const r = await rawRequest({ port: P_PAR + 102, method: m, path: p, body, headers: auth() })
+                const r = await tap2.request({ port: P_PAR + 102, method: m, path: p, body, headers: auth() })
                 assert.equal(r.status, 200)
                 assert.equal(r.json.ok, false, p)
             }
-            const all = await waitLines(f2, 3)
-            await sleep(300)
-            assert.equal(readLines(f2).length, 3)
+            const all = readEntries(f2)
+            assert.equal(all.length, 3, '各記恰一筆')
             for (const e of all) {
                 assert.equal(e.status, 200)
                 assert.equal(e.ok, false)
@@ -353,58 +368,84 @@ describe('api-audit：操作紀錄與系統級開關', function() {
         })
 
         it('A01 客戶端在處理中途斷線：動作照常執行並仍記恰一筆（status 為數字）', async () => {
+            // 以事件閘門決定順序（舊作法：handler sleep(300)、客戶端 80 ms 後斷線、再 sleep(900)，負載下順序會顛倒而悄悄退化成一般請求）：
+            // handler 啟動(started) → 客戶端斷線 → 伺服器端該連線之 socket 已 close（實測：Hapi 對「請求本體已收完」之斷線不發事件，
+            // 要等 handler 完成才發 response 事件，故斷線與否改由 socket close 界定）→ 放行 handler → handler 完成(done)
+            // → 該請求之 response 事件（稽核於此寫入）→ 再送一個屏障請求（其處理需要經過事件迴圈，若有重複寫入此時必已出現）→ 才斷言
             const f2 = path.join(fdTmp, 'abort.jsonl')
             const calls = []
+            const started = deferred()
+            const gate = deferred()
+            const done = deferred()
+            const closed = deferred()
             const slow = {
                 ...makeBackend(calls),
                 mouseClick: async (...a) => {
-                    await sleep(300)
+                    started.resolve()
+                    await gate.promise
                     calls.push(['mouseClick', ...a])
+                    done.resolve()
                 }
             }
             const s = await H.start({ port: P_PAR + 103, auditLogFile: f2, backend: slow, chromeManager: makeChrome([]) })
-            await new Promise((resolve) => {
-                const req = http.request({ host: '127.0.0.1', port: P_PAR + 103, method: 'POST', path: '/mouse/click', headers: { ...auth(), 'content-type': 'application/json' } })
-                req.on('error', () => resolve())
-                req.write(JSON.stringify({ x: 9, y: 9 }))
-                req.end()
-                setTimeout(() => {
-                    req.destroy()
-                    resolve()
-                }, 80)
-            })
-            await sleep(900)
+            const tap2 = tapResponses(s)
+            s.listener.once('connection', (socket) => socket.once('close', () => closed.resolve())) // 此時尚無其他連線；第一條連線即斷線者
+            const req = http.request({ host: '127.0.0.1', port: P_PAR + 103, method: 'POST', path: '/mouse/click', headers: { ...auth(), 'content-type': 'application/json' } })
+            req.on('error', () => {}) // 自行斷線之 ECONNRESET
+            req.write(JSON.stringify({ x: 9, y: 9 }))
+            req.end()
+            tap2.expect(1)
+            await guard(started.promise, 'handler 未啟動')
+            req.destroy() // 客戶端在處理中途斷線
+            await guard(closed.promise, '伺服器端未見連線關閉')
+            assert.deepEqual(calls, [], '本案要求「處理中途」斷線：伺服器端見到斷線時 handler 尚未完成')
+            gate.resolve()
+            await guard(done.promise, 'handler 未完成')
+            await tap2.waitSeen(1, '斷線之請求完成後應發出 response 事件')
+            const barrier = await tap2.request({ port: P_PAR + 103, path: '/chrome', headers: auth() })
+            assert.equal(barrier.status, 200)
             assert.deepEqual(calls, [['mouseClick', 9, 9, 1]], '動作應照常完成')
-            const all = readLines(f2).map((x) => JSON.parse(x))
-            assert.equal(all.length, 1, `斷線之請求應恰一筆：${JSON.stringify(all)}`)
+            const all = readEntries(f2)
+            assert.equal(all.length, 2, `斷線之請求應恰一筆（另加屏障請求一筆）：${JSON.stringify(all)}`)
             assert.equal(all[0].path, '/mouse/click')
             assert.equal(typeof all[0].status, 'number')
             assert.equal(all[0].ip, '127.0.0.1', '斷線後 socket 位址不可得，須取請求一開始記下之位址（實測：未處理時 ip 為空字串）')
+            assert.equal(all[1].path, '/chrome')
             await H.stop(s)
         })
 
         it('A01 handler 失敗（Chrome 未開，HTTP 200、ok:false）：記 ok:false 與 code，仍記參數摘要', async () => {
             const f2 = path.join(fdTmp, 'closed.jsonl')
-            await H.start({ port: P_PAR, auditLogFile: f2, enableEvaluate: true, backend: makeBackend([]), chromeManager: makeChrome([], { open: false }) })
-            const r = await rawRequest({ port: P_PAR, method: 'POST', path: '/chrome/evaluate', body: { script: SECRET_SCRIPT }, headers: auth() })
+            const s = await H.start({ port: P_PAR, auditLogFile: f2, enableEvaluate: true, backend: makeBackend([]), chromeManager: makeChrome([], { open: false }) })
+            const tap2 = tapResponses(s)
+            const r = await tap2.request({ port: P_PAR, method: 'POST', path: '/chrome/evaluate', body: { script: SECRET_SCRIPT }, headers: auth() })
             assert.equal(r.json.code, 'CHROME_NOT_OPEN')
-            const [e] = await waitLines(f2, 1)
+            const all = readEntries(f2)
+            assert.equal(all.length, 1, 'handler 失敗應恰一筆')
+            const [e] = all
             assert.equal(e.status, 200)
             assert.equal(e.ok, false)
             assert.equal(e.code, 'CHROME_NOT_OPEN')
             assert.deepEqual(e.params, { scriptLen: SECRET_SCRIPT.length, scriptSha256: sha(SECRET_SCRIPT) })
-            await sleep(300)
-            assert.equal(readLines(f2).length, 1, 'handler 失敗應恰一筆')
+            await H.stop(s)
         })
 
         it('A01 並行 40 個請求：每筆一行、皆為合法 JSON、不交錯', async () => {
             const f3 = path.join(fdTmp, 'par.jsonl')
             const s = await H.start({ port: P_PAR + 100, auditLogFile: f3, backend: makeBackend([]), chromeManager: makeChrome([]) })
-            await Promise.all(Array.from({ length: 40 }, (_, i) => rawRequest({ port: P_PAR + 100, method: 'POST', path: '/mouse/click', body: { x: i, y: i }, headers: auth() })))
-            const all = await waitLines(f3, 40)
+            const tap2 = tapResponses(s)
+            await Promise.all(Array.from({ length: 40 }, (_, i) => tap2.request({ port: P_PAR + 100, method: 'POST', path: '/mouse/click', body: { x: i, y: i }, headers: auth() })))
+            assert.equal(tap2.seen, 40)
+            const all = readEntries(f3) // 40 個請求之 response 事件皆已過；以 JSON.parse 逐行解析本身即驗證「不交錯」
             assert.equal(all.length, 40)
             assert.deepEqual(all.map((e) => e.params.x).sort((a, b) => a - b), Array.from({ length: 40 }, (_, i) => i))
             await H.stop(s)
+        })
+
+        it('A01 收尾：本區塊對同一伺服器之全部請求，紀錄總數 = 請求數 − 3 個不記的請求（/health、404、HEAD /health），無遲發之重複寫入', () => {
+            // 事件序只能界定「response 事件當下」的狀態；本案補一道總量守恆：以整段測試經過的時間為觀察區間（非 sleep），
+            // 若有計時器遲發之重複寫入，先前請求的重複紀錄此刻必已落檔，總數即對不上
+            assert.equal(readLines(f).length, tap.seen - 3, `請求 ${tap.seen} 個，其中 3 個（GET /health、GET 404、HEAD /health）不記`)
         })
     })
 
@@ -422,13 +463,23 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             ['/screenshot', {}],
         ]
         let banner
+        let tap
+
+        // 本區塊所有請求都經 tap（等到伺服器端 response 事件才返回），故以此遮蔽匯入之 rawRequest：之後讀紀錄檔即為最終狀態
+        const rawRequest = (o) => tap.request(o)
 
         before(async () => {
-            const { out } = await H.captureConsole(() => H.start({ port: P_DENY, enableSystem: false, auditLogFile: f, backend: makeBackend(bCalls), chromeManager: makeChrome([]) }))
+            const { r: srv, out } = await H.captureConsole(() => H.start({ port: P_DENY, enableSystem: false, auditLogFile: f, backend: makeBackend(bCalls), chromeManager: makeChrome([]) }))
             banner = out
+            tap = tapResponses(srv)
         })
 
-        const last = async (n) => (await waitLines(f, n))[n - 1]
+        // 第 n 筆紀錄；呼叫時（前 n 個請求之 response 事件皆已過）檔案應恰有 n 行
+        const last = async (n) => {
+            const all = readEntries(f)
+            assert.equal(all.length, n, `${f} 應恰有 ${n} 行`)
+            return all[n - 1]
+        }
 
         it('A03 401：無 token、錯 token → 記 denied=UNAUTHORIZED、來源 IP、端點；不記 token', async () => {
             const a = await rawRequest({ port: P_DENY, path: '/chrome' })
@@ -532,13 +583,12 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             assert.equal(r4.status, 403)
             const r5 = await rawRequest({ port: P_DENY, path: '/chrome', headers: { host: `evil.example/${TOKEN}` } })
             assert.equal(r5.status, 403)
-            const all = await waitLines(f, before + 4)
+            const all = readEntries(f) // 5 個請求之 response 事件皆已過（r1 為 404 不記）
             const mine = all.slice(before)
             assert.equal(mine.length, 4)
             assert.equal(mine[0].path, '/probe/<long>')
             assert.equal(mine[2].origin, 'https://evil.example')
             assert.equal(mine[3].host, '<invalid>')
-            await sleep(300)
             const text = fs.readFileSync(f, 'utf8')
             assert.ok(!text.includes(TOKEN) && !text.includes('pw@'), '紀錄檔洩漏 token 或帳密')
         })
@@ -560,9 +610,12 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             const f2 = path.join(fdTmp, 'short-token.jsonl')
             const SHORT = 'tok-0123456789abcdef' // 20 字元：不會被 <long> 遮蔽，只能靠寫入器清除
             const s = await H.start({ port: P_PAR + 105, token: SHORT, auditLogFile: f2, backend: makeBackend([]), chromeManager: makeChrome([]) })
-            const r = await rawRequest({ port: P_PAR + 105, path: `/probe/${SHORT}`, headers: { origin: EVIL } })
+            const tap2 = tapResponses(s)
+            const r = await tap2.request({ port: P_PAR + 105, path: `/probe/${SHORT}`, headers: { origin: EVIL } })
             assert.equal(r.status, 403)
-            const [e] = await waitLines(f2, 1)
+            const all = readEntries(f2)
+            assert.equal(all.length, 1)
+            const [e] = all
             assert.equal(e.path, '/probe/<redacted>')
             assert.ok(!fs.readFileSync(f2, 'utf8').includes(SHORT))
             await H.stop(s)
@@ -586,11 +639,12 @@ describe('api-audit：操作紀錄與系統級開關', function() {
                 const calls = []
                 const f = path.join(fdTmp, 'env.jsonl')
                 const s = await H.start({ port: P_ENV, auditLogFile: f, backend: makeBackend(calls), chromeManager: makeChrome([]) })
-                const r = await rawRequest({ port: P_ENV, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
+                const tap = tapResponses(s)
+                const r = await tap.request({ port: P_ENV, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
                 assert.equal(r.status, 403)
                 assert.equal(r.json.code, 'SYSTEM_DISABLED')
                 assert.deepEqual(calls, [])
-                await waitLines(f, 1)
+                assert.equal(readLines(f).length, 1)
                 await H.stop(s)
 
                 const s2 = await H.start({ port: P_ENV, auditLogFile: f, enableSystem: true, backend: makeBackend(calls), chromeManager: makeChrome([]) })
@@ -620,16 +674,18 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             const f = path.join(fdTmp, 'preflight.jsonl')
             const OK_ORIGIN = 'https://dev.example'
             const s = await H.start({ port: P_PAR + 104, auditLogFile: f, allowedOrigins: [OK_ORIGIN], backend: makeBackend([]), chromeManager: makeChrome([]) })
-            const pre = await rawRequest({ port: P_PAR + 104, method: 'OPTIONS', path: '/mouse/click', headers: { 'origin': OK_ORIGIN, 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,content-type' } })
+            const tap = tapResponses(s)
+            const pre = await tap.request({ port: P_PAR + 104, method: 'OPTIONS', path: '/mouse/click', headers: { 'origin': OK_ORIGIN, 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,content-type' } })
             assert.ok(pre.status === 200 || pre.status === 204, `status=${pre.status}`)
             assert.equal(pre.headers['access-control-allow-origin'], OK_ORIGIN)
-            await sleep(400)
+            assert.equal(tap.seen, 1, '預檢也會發 response 事件（否則下一行之「不記」無從由事件序判定）')
             assert.equal(readLines(f).length, 0, '成功預檢不應產生紀錄（驗證 Hapi 特殊路由之實際形狀確實被排除）')
-            const r = await rawRequest({ port: P_PAR + 104, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: { ...auth(), origin: OK_ORIGIN } })
+            const r = await tap.request({ port: P_PAR + 104, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: { ...auth(), origin: OK_ORIGIN } })
             assert.equal(r.status, 200)
-            const bad = await rawRequest({ port: P_PAR + 104, method: 'OPTIONS', path: '/mouse/click', headers: { 'origin': EVIL, 'access-control-request-method': 'POST' } })
+            const bad = await tap.request({ port: P_PAR + 104, method: 'OPTIONS', path: '/mouse/click', headers: { 'origin': EVIL, 'access-control-request-method': 'POST' } })
             assert.equal(bad.status, 403)
-            const all = await waitLines(f, 2)
+            const all = readEntries(f)
+            assert.equal(all.length, 2)
             assert.deepEqual(all.map((e) => [e.method, e.path, e.status, e.denied]), [['POST', '/mouse/click', 200, undefined], ['OPTIONS', '/mouse/click', 403, 'FORBIDDEN_ORIGIN']])
             await H.stop(s)
         })
@@ -641,18 +697,14 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             const d = path.join(fdTmp, 'rot')
             const f = path.join(d, 'audit.jsonl')
             const s = await H.start({ port: P_ROT, auditLogFile: f, auditLogMaxBytes: 2048, auditLogKeep: 2, backend: makeBackend([]), chromeManager: makeChrome([]) })
+            const tap = tapResponses(s)
             const N = 60
             for (let i = 1; i <= N; i++) {
-                const r = await rawRequest({ port: P_ROT, method: 'POST', path: '/mouse/click', body: { x: i, y: i }, headers: auth() })
+                const r = await tap.request({ port: P_ROT, method: 'POST', path: '/mouse/click', body: { x: i, y: i }, headers: auth() })
                 assert.equal(r.status, 200)
             }
-            // 等最後一筆落檔
-            const t0 = Date.now()
-            while (Date.now() - t0 < 4000) {
-                const cur = readLines(f)
-                if (cur.length && JSON.parse(cur[cur.length - 1]).params.x === N) break
-                await sleep(20)
-            }
+            // 第 N 個請求之 response 事件已過，最後一筆（含其輪替）已同步落檔
+            assert.equal(JSON.parse(readLines(f).pop()).params.x, N)
             assert.deepEqual(fs.readdirSync(d).sort(), ['audit.jsonl', 'audit.jsonl.1', 'audit.jsonl.2'])
             for (const n of fs.readdirSync(d)) assert.ok(fs.statSync(path.join(d, n)).size <= 2048, `${n} 超過上限`)
             const seq = [2, 1].flatMap((k) => readLines(`${f}.${k}`)).concat(readLines(f)).map((x) => JSON.parse(x).params.x)
@@ -672,15 +724,15 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             const calls = []
             const { r: s, lines } = await H.captureConsole(async () => {
                 const srv = await H.start({ port: P_FAIL, auditLogFile: f, backend: makeBackend(calls), chromeManager: makeChrome([]) })
+                const tap = tapResponses(srv)
                 for (let i = 0; i < 6; i++) {
-                    const r = await rawRequest({ port: P_FAIL, method: 'POST', path: '/mouse/click', body: { x: i, y: i }, headers: auth() })
+                    const r = await tap.request({ port: P_FAIL, method: 'POST', path: '/mouse/click', body: { x: i, y: i }, headers: auth() })
                     assert.equal(r.status, 200, `第 ${i} 個請求`)
                     assert.equal(r.json.ok, true)
                 }
-                const denied = await rawRequest({ port: P_FAIL, path: '/chrome' })
+                const denied = await tap.request({ port: P_FAIL, path: '/chrome' })
                 assert.equal(denied.status, 401)
-                await sleep(400)
-                return srv
+                return srv // 7 個請求之 response 事件皆已過：每次寫入失敗之警告（console.warn）都已發出
             })
             assert.equal(calls.length, 6, '動作照常執行')
             const warns = lines.filter((x) => /\[audit\]/.test(x))
@@ -696,12 +748,12 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             const f = path.join(fdTmp, 'off.jsonl')
             const calls = []
             const { r: s, out } = await H.captureConsole(() => H.start({ port: P_OFF, auditLog: false, auditLogFile: f, backend: makeBackend(calls), chromeManager: makeChrome([]) }))
-            const r = await rawRequest({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
+            const tap = tapResponses(s)
+            const r = await tap.request({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
             assert.equal(r.status, 200)
-            const d = await rawRequest({ port: P_OFF, path: '/chrome' })
+            const d = await tap.request({ port: P_OFF, path: '/chrome' })
             assert.equal(d.status, 401)
-            await sleep(400)
-            assert.equal(fs.existsSync(f), false, '關閉時不得建立紀錄檔')
+            assert.equal(fs.existsSync(f), false, '關閉時不得建立紀錄檔') // 兩個請求（含一個被拒絕者）之 response 事件皆已過：判定未寫，不需觀察窗
             assert.match(out, /audit-log=OFF/)
             assert.match(out, /audit log is OFF/i)
             await H.stop(s)
@@ -712,13 +764,12 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             process.env.SCREENCTL_AUDIT_LOG = '0'
             try {
                 const s = await H.start({ port: P_OFF, auditLogFile: f, backend: makeBackend([]), chromeManager: makeChrome([]) })
-                await rawRequest({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
-                await sleep(400)
+                await tapResponses(s).request({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
                 assert.equal(fs.existsSync(f), false)
                 await H.stop(s)
                 const s2 = await H.start({ port: P_OFF, auditLog: true, auditLogFile: f, backend: makeBackend([]), chromeManager: makeChrome([]) })
-                await rawRequest({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
-                await waitLines(f, 1)
+                await tapResponses(s2).request({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
+                assert.equal(readLines(f).length, 1, '選項 auditLog:true 優先：同樣之請求這次有記錄（對照上一段之「未記」）')
                 await H.stop(s2)
             }
             finally {
@@ -731,8 +782,8 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             process.env.SCREENCTL_AUDIT_LOG_FILE = f
             try {
                 const s = await H.start({ port: P_OFF, auditLogFile: undefined, backend: makeBackend([]), chromeManager: makeChrome([]) })
-                await rawRequest({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
-                await waitLines(f, 1)
+                await tapResponses(s).request({ port: P_OFF, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
+                assert.equal(readLines(f).length, 1)
                 await H.stop(s)
             }
             finally {
@@ -743,9 +794,10 @@ describe('api-audit：操作紀錄與系統級開關', function() {
         it('A04 預設位置：<使用者目錄>/.w-screenctl/audit-<port>.jsonl（與 token 檔同目錄；此處使用者目錄已指到測試夾）', async () => {
             const f = path.join(fdHome, '.w-screenctl', `audit-${P_HOME}.jsonl`)
             const s = await H.start({ port: P_HOME, auditLogFile: undefined, backend: makeBackend([]), chromeManager: makeChrome([]) })
-            await rawRequest({ port: P_HOME, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
-            const [e] = await waitLines(f, 1)
-            assert.equal(e.path, '/mouse/click')
+            await tapResponses(s).request({ port: P_HOME, method: 'POST', path: '/mouse/click', body: { x: 1, y: 2 }, headers: auth() })
+            const all = readEntries(f)
+            assert.equal(all.length, 1)
+            assert.equal(all[0].path, '/mouse/click')
             await H.stop(s)
         })
 

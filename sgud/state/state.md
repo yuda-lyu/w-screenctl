@@ -1,6 +1,6 @@
 # 現況(state)
 
-只記現況、不寫過程(過程見 `sgud/exp/experience.md`);藍圖見 `sgud/rule/rulebook.md`.最後更新:2026-10-26(screenctl-run02).`package.json` 版本 1.0.26(run01、run02 皆未改版、未發布;npm 帳號暫時被鎖).
+只記現況、不寫過程(過程見 `sgud/exp/experience.md`);藍圖見 `sgud/rule/rulebook.md`.最後更新:2026-10-30(tm-screenctl,計時器相關測試改事件同步;src 零改動).`package.json` 版本 1.0.28(未改版、未發布);相依已升 w-mousekey ^1.0.45、wsemi ^1.9.32.
 
 ## 功能狀態
 
@@ -19,6 +19,7 @@
 | `g.mjs` 旗標(`--host --token-file --evaluate --allow-origin --allow-host --no-system --no-audit-log --audit-log-file --help`) | 完成;刻意無 `--token` | SEC-11、AUD-05/06 | `api-security-g` | — |
 | `service/`(systemd、工作排程) | 已改為本機綁定 + token 由檔案/環境變數 | — | 無自動測試(設定檔) | 未於真實 systemd/排程器實跑 |
 | README(安全預設、Upgrade Notes)、`SECURITY.md`、JSDoc | 完成 | — | — | `docs/` 與 `dist/` 由發布流程重建,目前仍是舊碼 |
+| 計時器相關測試(事件同步;2026-10-30 tm-screenctl) | 完成:`api-audit`(32 個 sleep／輪詢站點→0)、`api-security-g`(`waitUp` 競爭子行程 exit、稽核落檔改 `fs.watch`、否定窗改後續請求界定)、`chromeManager`(queue 閘門、`_withDeadline` 補清計時器斷言)、`momo.e2e`(`sleep(5000)`→`readyState` 與截圖非空白之條件式重試);負載試驗工具 `test/tools/loadTrial.mjs`、`loadPreload.mjs`;測試輔助 `respTap.mjs`、`fileWait.mjs` | TM-01~TM-08 | `api-audit`、`api-security-g`、`chromeManager`、`momo.e2e` | 沒有新增 `opt.onTrace`(稽核寫入器同步且無計時器,src 零改動);已知限制:計時器遲發之重複寫入僅由「收尾」總量守恆案抓,稽核寫入器若改非同步須先加 src 觀察回調;`momo.e2e` 有頭＋外網,不納入負載試驗 |
 
 ## 最近一次驗證
 

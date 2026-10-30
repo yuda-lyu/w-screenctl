@@ -9,10 +9,25 @@ import WScreenctl from '../src/WScreenctl.mjs'
 
 const PORT = parseInt(process.env.E2E_PORT || '8080', 10)
 const TARGET_URL = 'https://www.momoshop.com.tw/main/Main.jsp'
-const RENDER_WAIT_MS = 5000
 const TOKEN = 'momo-e2e-test-token-0123456789' // 預設安全後所有端點（除 /health）須 Bearer token
 
+// 外部網站（momoshop）之渲染時間不可控（網路、廣告、反爬機制皆在我們之外），故不以固定延時假設「5 秒後必已渲染」，
+// 改等頁面可觀察之就緒條件（見 waitFor 的用法）。下列兩個常數都不是「等待時間」：
+// WATCHDOG_MS 只防懸置（須小於 mocha 的 60s 逾時），條件成立即返回；POLL_MS 為取樣間隔。
+// 外部站點本身無法由測試控制之部分（站點改版、被限流或導向驗證頁）仍可能使本案失敗，那是環境事實而非計時問題。
+const WATCHDOG_MS = 45000
+const POLL_MS = 500
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// 重複取樣直到 check() 回傳真值；check 內的斷言錯誤（真失敗）直接拋出，不重試
+async function waitFor(check, label) {
+    const t0 = Date.now()
+    for (;;) {
+        if (await check()) return
+        if (Date.now() - t0 > WATCHDOG_MS) throw new Error(`watchdog ${WATCHDOG_MS}ms: ${label()}`)
+        await sleep(POLL_MS)
+    }
+}
 
 async function api(method, urlPath, body) {
     const r = await fetch(`http://127.0.0.1:${PORT}${urlPath}`, {
@@ -30,7 +45,8 @@ describe('e2e: chrome 開→ momo →截圖→關', function() {
 
     before(async () => {
         // auditLog:false：本測試不驗操作紀錄，且預設紀錄檔位於使用者目錄
-        server = await WScreenctl({ port: PORT, token: TOKEN, auditLog: false })
+        // enableEvaluate：僅供測試端讀 document.readyState 判斷頁面是否載入完成（見渲染等待案）；本服務只綁本機且須 token
+        server = await WScreenctl({ port: PORT, token: TOKEN, auditLog: false, enableEvaluate: true })
     })
 
     after(async () => {
@@ -54,13 +70,26 @@ describe('e2e: chrome 開→ momo →截圖→關', function() {
         assert.equal(r.gotoOk, true, `goto failed: ${r.gotoError}`)
     })
 
-    it('等首頁渲染後 POST /chrome/screenshot 取得 base64 PNG', async () => {
-        await sleep(RENDER_WAIT_MS)
-        const r = await api('POST', '/chrome/screenshot')
-        assert.equal(r.ok, true, `screenshot failed: ${r.error}`)
+    it('首頁載入完成（readyState=complete）且截圖非空白後，POST /chrome/screenshot 取得 base64 PNG', async () => {
+        // /chrome/open 只等到 navigation commit，頁面仍在載入／渲染（實測 headless：0.9s 時 readyState=loading 而截圖已 14975B，
+        // 單看截圖大小會在頁面尚未載入時就放行），所以就緒條件有兩個，皆為頁面可觀察之狀態，條件式重試至成立：
+        // ①document.readyState==='complete'（載入狀態）②截圖為非空白（>10000B）之 PNG。舊作法：sleep(5000) 後截一張。
+        // 任一請求失敗（ok:false）為真失敗，不重試
+        await waitFor(async () => {
+            const e = await api('POST', '/chrome/evaluate', { script: 'document.readyState' })
+            assert.equal(e.ok, true, `evaluate failed: ${e.error}`)
+            return e.result === 'complete'
+        }, () => '頁面 readyState 未達 complete')
+        let r
+        let buf
+        await waitFor(async () => {
+            r = await api('POST', '/chrome/screenshot')
+            assert.equal(r.ok, true, `screenshot failed: ${r.error}`)
+            buf = Buffer.from(r.image, 'base64')
+            return buf.length > 10000
+        }, () => `截圖仍為空白頁（最後一張 ${buf ? buf.length : 0}B）`)
         assert.equal(r.format, 'png')
 
-        const buf = Buffer.from(r.image, 'base64')
         // PNG 標頭驗證：8 bytes magic
         const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
         assert.ok(buf.subarray(0, 8).equals(PNG_MAGIC), 'screenshot 不是合法 PNG')

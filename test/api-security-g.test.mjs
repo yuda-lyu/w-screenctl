@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { rawRequest } from './tools/rawHttp.mjs'
+import { waitFileLines } from './tools/fileWait.mjs'
+import { guard } from './tools/respTap.mjs'
 
 const fdTest = path.dirname(fileURLToPath(import.meta.url))
 const fdRoot = path.dirname(fdTest)
@@ -50,17 +52,30 @@ function runG({ name, args = [], env = {} }) {
     return h
 }
 
-async function waitUp(port, ms = 20000) {
-    const t0 = Date.now()
-    while (Date.now() - t0 < ms) {
-        try {
-            const r = await rawRequest({ port, path: '/health' })
-            if (r.status === 200) return
+// 就緒條件：子行程已在聽且 /health 回 200（啟動摘要為同步寫入檔案，故此時 stdout／stderr 之啟動輸出已齊）。
+// 輪詢間隔只是重試節奏，不是「等 N 毫秒後假設已就緒」；子行程提前結束即時失敗（不空等到上限）；
+// 上限（真實計時器，預設 60s，高於負載試驗下之啟動時間）只防懸置，不表達規格
+async function waitUp(port, h, ms = 60000) {
+    const st = { stop: false }
+    const poll = (async () => {
+        while (!st.stop) {
+            try {
+                const r = await rawRequest({ port, path: '/health' })
+                if (r.status === 200) return
+            }
+            catch {}
+            await new Promise((resolve) => setTimeout(resolve, 100))
         }
-        catch {}
-        await new Promise((resolve) => setTimeout(resolve, 150))
+    })()
+    const died = h.exited.then((x) => {
+        throw new Error(`g.mjs exited before ready on ${port}: code=${x.code} signal=${x.signal}\n${h.stderr()}`)
+    })
+    try {
+        await guard(Promise.race([poll, died]), `server on ${port} not up within ${ms}ms`, ms)
     }
-    throw new Error(`server on ${port} not up within ${ms}ms`)
+    finally {
+        st.stop = true
+    }
 }
 
 async function stop(h) {
@@ -91,7 +106,7 @@ describe('api-security-g：node g.mjs', function() {
         const port = 8751
         const fTok = path.join(fdTmp, 'g1.token')
         const h = runG({ name: 'g1', env: { PORT: String(port), SCREENCTL_TOKEN_FILE: fTok } })
-        await waitUp(port)
+        await waitUp(port, h)
 
         // 免 token：/health
         assert.equal((await rawRequest({ port, path: '/health' })).status, 200)
@@ -124,7 +139,7 @@ describe('api-security-g：node g.mjs', function() {
         const port = 8752
         const fTok = path.join(fdTmp, 'g2.token')
         const h = runG({ name: 'g2', args: ['--evaluate'], env: { PORT: String(port), SCREENCTL_TOKEN_FILE: fTok } })
-        await waitUp(port)
+        await waitUp(port, h)
         const tok = fs.readFileSync(fTok, 'utf8').trim()
         const ev = await rawRequest({ port, method: 'POST', path: '/chrome/evaluate', body: { script: '1+1' }, headers: { authorization: `Bearer ${tok}` } })
         assert.equal(ev.status, 200)
@@ -138,7 +153,7 @@ describe('api-security-g：node g.mjs', function() {
         const fTok = path.join(fdTmp, 'g3.token')
         const envTok = 'env-token-0123456789abcdef-ZZ'
         const h = runG({ name: 'g3', env: { PORT: String(port), SCREENCTL_ENABLE_EVALUATE: '1', SCREENCTL_TOKEN: envTok, SCREENCTL_TOKEN_FILE: fTok } })
-        await waitUp(port)
+        await waitUp(port, h)
         const ev = await rawRequest({ port, method: 'POST', path: '/chrome/evaluate', body: { script: '1+1' }, headers: { authorization: `Bearer ${envTok}` } })
         assert.equal(ev.json.code, 'CHROME_NOT_OPEN')
         assert.equal(fs.existsSync(fTok), false, '以環境變數給 token 時不應寫 token 檔')
@@ -149,7 +164,7 @@ describe('api-security-g：node g.mjs', function() {
     it('R10 --allow-origin 白名單：預檢放行；其他 Origin 403', async () => {
         const port = 8754
         const h = runG({ name: 'g4', args: ['--allow-origin', 'https://dev.example'], env: { PORT: String(port), SCREENCTL_TOKEN: 'g4-token-0123456789abcdef-XX' } })
-        await waitUp(port)
+        await waitUp(port, h)
         const ok = await rawRequest({ port, method: 'OPTIONS', path: '/chrome/open', headers: { 'origin': 'https://dev.example', 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization' } })
         assert.equal(ok.headers['access-control-allow-origin'], 'https://dev.example')
         const bad = await rawRequest({ port, method: 'OPTIONS', path: '/chrome/open', headers: { 'origin': EVIL, 'access-control-request-method': 'POST' } })
@@ -162,7 +177,7 @@ describe('api-security-g：node g.mjs', function() {
         const fA = path.join(fdTmp, 'g9-flag.token')
         const fB = path.join(fdTmp, 'g9-env.token')
         const h = runG({ name: 'g9', args: ['--token-file', fA], env: { PORT: String(port), SCREENCTL_TOKEN_FILE: fB } })
-        await waitUp(port)
+        await waitUp(port, h)
         assert.ok(fs.existsSync(fA), '旗標指定之 token 檔應被建立')
         assert.equal(fs.existsSync(fB), false, '環境變數指定之 token 檔不應被碰')
         const tok = fs.readFileSync(fA, 'utf8').trim()
@@ -178,7 +193,7 @@ describe('api-security-g：node g.mjs', function() {
             args: ['--allow-origin', 'https://a.example', '--allow-origin', 'https://b.example', '--allow-host', 'proxy.lan'],
             env: { PORT: String(port), SCREENCTL_TOKEN: tok },
         })
-        await waitUp(port)
+        await waitUp(port, h)
         const pre = (origin) => rawRequest({ port, method: 'OPTIONS', path: '/chrome/open', headers: { origin, 'access-control-request-method': 'POST' } })
         assert.equal((await pre('https://a.example')).headers['access-control-allow-origin'], 'https://a.example')
         assert.equal((await pre('https://b.example')).headers['access-control-allow-origin'], 'https://b.example')
@@ -194,7 +209,7 @@ describe('api-security-g：node g.mjs', function() {
         const port = 8759
         const tok = 'g11-token-0123456789abcdef-XX'
         const h = runG({ name: 'g11', args: ['--evaluate'], env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_ENABLE_EVALUATE: '0' } })
-        await waitUp(port)
+        await waitUp(port, h)
         const ev = await rawRequest({ port, method: 'POST', path: '/chrome/evaluate', body: { script: '1+1' }, headers: { authorization: `Bearer ${tok}` } })
         assert.equal(ev.json.code, 'CHROME_NOT_OPEN')
         await stop(h)
@@ -227,7 +242,7 @@ describe('api-security-g：node g.mjs', function() {
         const tok = 'g12-token-0123456789abcdef-XX'
         // 環境變數 SCREENCTL_ENABLE_SYSTEM=1 與旗標 --no-system 衝突：旗標（選項）優先，系統級仍關閉
         const h = runG({ name: 'g12', args: ['--no-system'], env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_ENABLE_SYSTEM: '1' } })
-        await waitUp(port)
+        await waitUp(port, h)
         const r = await rawRequest({ port, method: 'POST', path: '/screenshot', body: {}, headers: { authorization: `Bearer ${tok}` } })
         assert.equal(r.status, 403)
         assert.equal(r.json.code, 'SYSTEM_DISABLED')
@@ -241,7 +256,7 @@ describe('api-security-g：node g.mjs', function() {
         const port = 8761
         const tok = 'g13-token-0123456789abcdef-XX'
         const h = runG({ name: 'g13', env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_ENABLE_SYSTEM: '0' } })
-        await waitUp(port)
+        await waitUp(port, h)
         const r = await rawRequest({ port, method: 'POST', path: '/screenshot', body: {}, headers: { authorization: `Bearer ${tok}` } })
         assert.equal(r.json.code, 'SYSTEM_DISABLED')
         await stop(h)
@@ -253,11 +268,11 @@ describe('api-security-g：node g.mjs', function() {
         const fA = path.join(fdTmp, 'g14-flag.audit.jsonl')
         const fB = path.join(fdTmp, 'g14-env.audit.jsonl')
         const h = runG({ name: 'g14', args: ['--audit-log-file', fA], env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_AUDIT_LOG_FILE: fB } })
-        await waitUp(port)
+        await waitUp(port, h)
         assert.equal((await rawRequest({ port, path: '/chrome', headers: { authorization: `Bearer ${tok}` } })).status, 200)
         assert.equal((await rawRequest({ port, path: '/chrome' })).status, 401)
-        const t0 = Date.now()
-        while (Date.now() - t0 < 4000 && !(fs.existsSync(fA) && fs.readFileSync(fA, 'utf8').split('\n').filter(Boolean).length >= 2)) await new Promise((resolve) => setTimeout(resolve, 50))
+        // 紀錄由子行程於 response 事件寫入，測試端拿不到其事件：以檔案系統通知（fs.watch）為同步點，等到兩行都落檔
+        await waitFileLines(fA, 2)
         const lines = fs.readFileSync(fA, 'utf8').split('\n').filter(Boolean).map((x) => JSON.parse(x))
         assert.deepEqual(lines.map((x) => [x.method, x.path, x.status, x.denied]), [['GET', '/chrome', 200, undefined], ['GET', '/chrome', 401, 'UNAUTHORIZED']])
         assert.equal(fs.existsSync(fB), false, '環境變數指定之紀錄檔不應被碰')
@@ -272,9 +287,11 @@ describe('api-security-g：node g.mjs', function() {
         const f = path.join(fdTmp, 'g15.audit.jsonl')
         // 環境變數 SCREENCTL_AUDIT_LOG=1 與旗標 --no-audit-log 衝突：旗標（選項）優先，仍不寫紀錄
         const h = runG({ name: 'g15', args: ['--no-audit-log'], env: { PORT: String(port), SCREENCTL_TOKEN: tok, SCREENCTL_AUDIT_LOG: '1', SCREENCTL_AUDIT_LOG_FILE: f } })
-        await waitUp(port)
+        await waitUp(port, h)
         assert.equal((await rawRequest({ port, path: '/chrome', headers: { authorization: `Bearer ${tok}` } })).status, 200)
-        await new Promise((resolve) => setTimeout(resolve, 500))
+        // 否定斷言（不寫紀錄）：不用觀察窗。子行程是獨立行程、測試端拿不到其事件，故以「後續請求（會被記錄的被拒請求）也完整處理完畢」界定：
+        // 前一請求排下的後續工作（nextTick／immediate／promise 續行）必先於後一請求之處理；此時仍無紀錄檔即判定未寫
+        assert.equal((await rawRequest({ port, path: '/chrome' })).status, 401)
         assert.equal(fs.existsSync(f), false)
         assert.match(h.stdout(), /audit-log=OFF/)
         assert.match(h.stderr() + h.stdout(), /audit log is OFF/i)

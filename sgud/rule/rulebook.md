@@ -55,6 +55,23 @@ node C:/opensrcOper/tools/quiet-run.mjs --lock --name <名> -- node node_modules
 | AUD-07 啟動輸出列出能力 | `describeSecurity` 的 `capabilities` 行:chrome／系統級(on｜DISABLED)／evaluate(off｜ON)／audit-log(路徑｜OFF);audit 關閉另有警告 | `git grep -n --untracked "capabilities" -- src` | 站點=`describeSecurity` 一處 | A05(unit、api、g) |
 | AUD-08 測試不得寫真實使用者目錄 | 每個會啟動伺服器之測試:(a) `auditLogFile` 導向 `test/_tmp` 或 `auditLog:false`;(b) HOME／USERPROFILE 指到測試夾(`apiHarness.useFakeHome`;g 子行程以 env);變異執行器亦同 | `git grep -n --untracked "WScreenctl(" -- test` | 站點:`apiHarness.start`(預設帶 auditLogFile)、`bootRoutes`(auditLog:false)、`momo.e2e`(auditLog:false)、`api-security` 第二實例(EADDRINUSE,HOME 已指向測試夾)=已套;g 測試經 `runG` 的 env=已套 | 每次跑完人工核對 `~/.w-screenctl` 不存在(報告附) |
 
+## 一之三、計時器相關之測試規則(TM-xx;2026-10-30,tm-screenctl)
+
+**規格正本**:`C:\opensrcOper\dspec\計時器相關函數之觀察回調與測試.md`(P1~P7)與全域技能 role-coder-for-test §8(細則 `references/timer-tests.md`);本節只記本套件的落地與站點全集,不重述規格.
+
+**本套件特性**:被測的稽核寫入器(`createAuditLogger`)為**同步 append、無計時器**(`git grep -n "setTimeout\|setInterval" -- src/auditLog.mjs` 為空),故依規格「無計時器之函數:改等被測物事件,不為測試改 src」——**沒有新增任何 `opt.onTrace`**,對外行為與 JSDoc 未動.
+
+| 規則 | 須長成什麼樣 | 盤點指令 | 站點全集與判準 | 測試 |
+|---|---|---|---|---|
+| TM-01 in-process 稽核紀錄以 Hapi `response` 事件為同步點 | 掛在稽核監聽器**之後**的 `test/tools/respTap.mjs`(`tapResponses`):每個請求以 `tap.request()` 送出(等到伺服器端 response 事件才返回),其後讀紀錄檔即最終狀態;不 sleep、不輪詢紀錄檔.依據:podium 同步且依註冊順序呼叫監聽器,`audit.record` 為同步 append,`WScreenctl.mjs` 先註冊.**若稽核寫入器日後改為經計時器或 I/O 回呼才落檔(串流、佇列),本同步點即失效(變異 M02〔setImmediate 延後一輪〕新舊測試皆抓不到,因客戶端往返已涵蓋該延後),須先在 src 加寫入完成之觀察回調(`onTrace`,事件列舉寫入 JSDoc,並補五種回調案)再改本規則** | `git grep -n "sleep(\|waitLines" -- test`(應為空)；`git grep -n "tapResponses" -- test` | `api-audit.test.mjs` 全檔(改前 32 站點:`waitLines` 輪詢呼叫 17〔含 `last` 輔助 1,其下 9 個呼叫點〕、輪替案自寫輪詢 1、`sleep(300/400)` 否定窗 11、`sleep(900)` 1、handler 內 `sleep(250/300)` 2;改後 0)=已套 | api-audit 全檔 |
+| TM-02 否定斷言(不該有紀錄、不該多一筆)以事件序界定 | 不用觀察窗:`/health`、404、成功預檢、`auditLog:false` 之「不寫」,於該請求(及其後續請求)之 response 事件過後立即斷言;客戶端中途斷線案另加**屏障請求**(其處理須經過事件迴圈,handler 完成後之續行必已跑完)再數行.**已知限制**:計時器遲發(數十毫秒後才補寫)之重複寫入,response 事件當下抓不到(src 稽核路徑無計時器);改由第一區塊末尾之「A01 收尾」總量守恆案抓(整段測試經過的時間即觀察區間,非 sleep;變異 M03 新版 1 案轉紅,舊版 6 案) | 同上 | api-audit 之 11 處否定窗=已套;`api-security-g` 之 `--no-audit-log`(子行程,拿不到其事件)=後續請求完整處理後斷言(殘留限制同上) | api-audit、api-security-g |
+| TM-03 時間本身是規格者用假時鐘 | 「ms 反映實際處理時間」:`mock.timers.enable({ apis: ['Date'] })` 只假造 Date,handler 以閘門停住、測試推進 250 ms 後放行,斷言 `ms === 250`、`ts` 為假時鐘起點;真實計時器(socket、看門狗)不受影響;`finally` 內 `mock.timers.reset()` | `git grep -n "mock.timers" -- test` | api-audit「耗時（ms）」一案=已套;其餘 `e.ms` 只斷言有限非負(不設牆鐘上界) | api-audit |
+| TM-04 客戶端中途斷線以事件閘門排序 | handler 閘門 `started`→客戶端 `req.destroy()`→伺服器端 `socket.once('close')`→放行 handler→`done`→該請求 response 事件→屏障請求;**實測 Hapi 對「請求本體已收完」之斷線不發事件,response 事件要等 handler 完成才來**(故用 socket close 界定「已斷線」)；舊作法(handler sleep 300、80 ms 後斷線、sleep 900)在負載下順序顛倒會悄悄退化成一般請求 | — | api-audit「客戶端在處理中途斷線」=已套 | api-audit |
+| TM-05 子行程(`node g.mjs`)以可觀察條件同步 | 就緒=`/health` 200(啟動輸出為同步寫檔,此時已齊)並與子行程 `exit` 競爭(提早結束即時失敗);稽核紀錄落檔以 `test/tools/fileWait.mjs`(`fs.watch` 通知,先建監看再檢查)等行數;看門狗(真實計時器)只防懸置 | `git grep -n "waitUp\|waitFileLines" -- test` | `api-security-g` 之 `waitUp` 12 處、`waitFileLines` 1 處=已套;`waitUp` 內 100 ms 為重試節奏,非等待假設 | api-security-g |
+| TM-06 外部網站渲染等待 | `momo.e2e`:`sleep(5000)` 改為兩個頁面可觀察之就緒條件,條件式重試(取樣 500 ms、看門狗 45 s):①`document.readyState==='complete'`(測試端伺服器加 `enableEvaluate:true` 僅供讀此值;實測 headless 於約 4.4 s 達成,而 0.9 s 時 readyState 仍為 loading、截圖卻已 14975B,故不可只看截圖大小)②截圖為 >10000B 之 PNG;`ok:false` 為真失敗不重試.外部站點本身不可控之部分(改版、限流、驗證頁)仍可使本案失敗,屬環境事實 | `git grep -n "WATCHDOG_MS" -- test/momo.e2e.test.mjs` | 1 站點=已套 | momo.e2e(有頭+外網,見下方〈對照表〉) |
+| TM-07 src 計時器不加 `onTrace` 之理由 | 逐站:`chromeManager._withDeadline`(測試直接 await 其 rejection/回值,無延時同步;已補清計時器之斷言)、`chromeManager` 清理寬限 `TIMEOUT_CLEANUP_GRACE`(需真 Chrome,無測試依其時序)、`WScreenctl` evaluate 5 s 逾時(測試只驗訊息分類 `errClassify`)、`gracefulShutdown` 硬逾時(`unref`,無測試) | `git grep -n "setTimeout" -- src` | 4 站點(`chromeManager.mjs:201,261,273`、`WScreenctl.mjs:208,464`)=刻意不加 | `chromeManager` |
+| TM-08 負載試驗 | `test/tools/loadTrial.mjs`＋`loadPreload.mjs`(複製自 w-mousekey;環境變數 `LT_LAG`／`LT_PROBE`,因測試會清 `SCREENCTL_*`).三種負載:`--burners 8`、`--lag 400:1000`、`--lag 1500:3000`;一律 `quiet-run --lock-exclusive`,PID 回驗,每次 mocha 須自行退出.依賴外網之 `momo.e2e` 不納入(外部站點之耗時不可重現,且有頭視窗) | `node test/tools/loadTrial.mjs --out <夾> --runs 5 --burners 8 --cwd <夾> -- --no-parallel test/api-audit.test.mjs test/api-security-g.test.mjs test/chromeManager.test.mjs --timeout 180000` | — | 見任務報告 |
+
 ## 二、改動範圍 → 測試檔對照表
 
 | 改動 | 必跑 |

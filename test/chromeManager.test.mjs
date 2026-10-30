@@ -120,9 +120,14 @@ describe('ChromeManager', () => {
         const m = new ChromeManager()
         const log = []
         // 用 _enqueue 直接餵 task 觀察序列化（不打 chromium）
+        // a 以閘門停住（舊作法：a 內 setTimeout 20 ms 製造「a 尚未完成」的時間窗）：閘門由測試放行，順序由因果決定，不依賴真實時間
+        let release
+        const gate = new Promise((resolve) => {
+            release = resolve
+        })
         const a = m._enqueue(async () => {
             log.push('a-start')
-            await new Promise((r) => setTimeout(r, 20))
+            await gate
             log.push('a-done')
             return 'A'
         })
@@ -130,6 +135,9 @@ describe('ChromeManager', () => {
             log.push('b-start')
             return 'B'
         })
+        await new Promise((resolve) => setImmediate(resolve)) // 讓出一輪事件迴圈：所有已就緒之微任務先跑完；若 b 未被序列化，此刻必已開始
+        assert.deepEqual(log, ['a-start'], 'a 未完成前 b 不得開始')
+        release()
         const [ra, rb] = await Promise.all([a, b])
         assert.equal(ra, 'A')
         assert.equal(rb, 'B')
@@ -155,8 +163,12 @@ describe('ChromeManager', () => {
 
     it('_withDeadline 成功路徑回值且 clearTimeout', async () => {
         const m = new ChromeManager()
-        const r = await m._withDeadline(Promise.resolve('ok'), 1000, 'test-op')
+        const timers = () => process.getActiveResourcesInfo().filter((x) => x === 'Timeout').length
+        await new Promise((resolve) => setImmediate(resolve)) // 先讓出：mocha 於 async 案回傳 promise 後才建立其逾時計時器，前後須在同一狀態量測
+        const base = timers()
+        const r = await m._withDeadline(Promise.resolve('ok'), 100000, 'test-op')
         assert.equal(r, 'ok')
+        assert.equal(timers(), base, '成功路徑須清掉逾時計時器（否則 100 秒的計時器撐住行程）') // 對應案名之「clearTimeout」
     })
 
 })
