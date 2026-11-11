@@ -1,5 +1,5 @@
 /*!
- * security v1.0.40
+ * security v1.0.41
  * (c) 2018-2021 yuda-lyu(semisphere)
  * Released under the MIT License.
  */
