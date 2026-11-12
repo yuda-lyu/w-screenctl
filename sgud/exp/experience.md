@@ -23,7 +23,7 @@
 - **變異測試執行器必須隔離家目錄**:被變異的程式(例如預設 host 改回 `0.0.0.0`、拿掉非迴路檢查)會正常啟動並把自動產生的 token 寫到真實的 `~/.w-screenctl/`(2026-10-26 實際發生,留下 6 個孤兒 token 檔,事後清除並回驗).跑變異時對子行程設 `HOME`、`USERPROFILE` 指到暫存夾.另外這些變異會真的綁 `0.0.0.0` 的測試 port(防火牆對話框風險),只在確有必要的變異才跑.
 ## 操作紀錄與系統級開關(2026-10-26 screenctl-run02)
 
-- **寫紀錄用 Hapi `response` 事件,不用 `onPreResponse`**:被 `onRequest` 接管(Origin／Host 拒絕)與 notFound／預檢特殊路由的請求,路由層擴充點(`onPreAuth`、`onPreResponse`)不會執行(server.ext 於建立後才註冊,不重建特殊路由的生命週期),只有 `server.events.on('response')` 對所有請求都觸發.拒絕原因由閘門寫在 `request.app.denied`,事件處理函式讀它.
+- **寫紀錄用 Hapi `response` 事件,不用 `onPreResponse`**:被 `onRequest` 接管(Origin／Host 拒絕)與 notFound／預檢特殊路由的請求,路由層擴充點(`onPreAuth`)不會執行,只有 `server.events.on('response')` 對所有請求都觸發.拒絕原因由閘門寫在 `request.app.denied`,事件處理函式讀它.〔2026-11-12 更正:原文把 `onPreResponse` 也列為「不會執行」並歸因於「server.ext 建立後才註冊」,與實測不符——特殊路由的 `rebuild` 只重建 postCycle,故**啟動前註冊**的 `onPreResponse` 對特殊路由與被 `onRequest` 接管的請求都會執行,只有 `onPreAuth` 等路由層擴充點不跑;**啟動後**才 `server.ext('onPreResponse')` 補掛者不會套到特殊路由.寫紀錄選 `response` 事件仍正確(它不受此限且恰一次)〕
 - **參數摘要在 `onPreHandler` 取**(驗證之後):驗證失敗(400)的請求不會走到,因此不會把格式錯誤的 payload 記進去;被閘門攔下的請求也沒有摘要.
 - **回應送出後才寫檔**:客戶端可能先收到回應、紀錄才落檔;**測試不得 sleep 或輪詢紀錄檔**(2026-10-30 起,見文末〈計時器相關測試〉):in-process 用 `test/tools/respTap.mjs` 等伺服器端 `response` 事件,子行程用 `test/tools/fileWait.mjs` 等 `fs.watch` 通知.「不應有紀錄」亦以事件序界定,不再用 300 ms 觀察窗.
 - **單一字元鍵(逐鍵輸入密碼)的處理**:`/keyboard/key` 若逐字送密碼,鍵名本身就是密碼;規則:具名鍵與含 ctrl／alt／super／meta 的快捷鍵原樣記,其餘單一可印字元記 `<char>`.
@@ -47,3 +47,13 @@
 - **`loadPreload` 的環境變數不可用 `SCREENCTL_` 開頭**:`api-security-g` 的 `cleanEnv` 與 `apiHarness.clearEnv` 會清掉 `SCREENCTL_*`,子行程(`node g.mjs`)就收不到負載;故不用 `SCREENCTL_`.
 - **負載執行器來源與環境變數(2026-10-30 起)**:`test/tools/loadTrial.mjs`＋`loadPreload.mjs` 自 wsemi(≥1.9.33)`test/tools/` **兩檔同時整份複製**,不各自修改(原複製自 w-mousekey、環境變數 `LT_*`,已汰換);環境變數統一 `WSEMI_LT_LAG`／`WSEMI_LT_PROBE`／`WSEMI_LT_DIAG`,測試之清環境變數處只清 `SCREENCTL_*`／`PORT`／`CHROME_USER_DATA`,不會清掉 `WSEMI_LT_*`.升版時以 `cmp node_modules/wsemi/test/tools/loadTrial.mjs test/tools/loadTrial.mjs`(與 `loadPreload.mjs`)驗位元組全等.與舊版差異:不退出失敗鍵 `(mocha did not exit)`;`--run-max` 預設 900 秒(單次逾 15 分須明給 `--run-max 0` 或更大值);`--exit-grace` 即 `--hang-sec`.
 - **`momo.e2e` 含於 `npm test` 的 glob**(`test/*.test.mjs`),會開有頭 Chrome 並連外網;跑全套前先確認桌面無人操作(`quser` 的閒置時間),否則排除該檔另跑.
+
+## 升 @hapi/hapi 21.4.13:Host 先行驗證之調適(2026-11-12 ds-scr;規則見 rulebook〈SEC-14〉)
+
+- **現象**:21.4.13 的 `Info` 建構子對 Host 做 RFC 9112 3.2 驗證(私有 `request._hostError`),`_onRequest` 開頭即拋,**早於所有 `onRequest` 擴充**;本套件的 Host 閘門與 `auditIp` 擴充因此跑不到,原回 403 的格式異常 Host 變成 Hapi 的 400 Boom,且 `app.denied` 未設(操作紀錄不寫)。升相依版時,「新版新增前置驗證」與「舊版自動做、新版移除」同為要掃的軸:凡在 `onRequest` 內做的拒絕,都要問「Hapi 會不會先擋」。
+- **探測結果(tmp 探針,Node 24)**:被 Hapi 先行擋下的請求**仍走** `onPreResponse`(此時 `request.response` 為 Boom 400、`request.headers.host` 為原值、`request.path` 為原路徑、`request.route` 為內建 notFound 特殊路由)與 `response` 事件(各恰一次);`onRequest` 擴充沒被呼叫。故以**公開 API** 的 `onPreResponse` 補:Boom 400 且本套件自己的 Host 判定(`hostVerdict`)為拒絕 → 換成 403 FORBIDDEN_HOST + `app.denied`。**不讀私有欄位、不比對錯誤訊息文字**。
+- **判定共用**:`hostVerdict` 為 onRequest 與 onPreResponse 的唯一判定,兩處不各寫一份;單元測試以「同一組輸入兩個擴充的拒絕與否、訊息必須一致」鎖住(4 種設定 × 多種 Host × 有無重複標頭)。
+- **來源位址**:被 Hapi 先擋的請求不經 `auditIp` 擴充,改用 Hapi 公開選項 `info: { remote: true }`(請求建立時即快取位址);測試以 `server.decorate('request', …, { apply: true })` 在「請求建立後、生命週期前」銷毀 socket 製造斷線——不用 `server.ext`,因**啟動後才補掛的 `onPreResponse` 不套到特殊路由**(實測),而 H.start 回傳時已啟動。變異 M5(拿掉 `info.remote`)該案轉紅。
+- **hapi 比本套件更寬/更嚴**:Hapi 的 `hostRx` 為 `^(?:\[[\w:.%~-]+\]|[\w.~!$&'()*+,;=%-]*)(?::\d*)?$`;本套件 `HOST_HEADER_RE` 的字元集與 port 形式皆為其子集 → 本套件放行者 Hapi 必放行(實證:兩者差異見 rulebook SEC-14 表)。Hapi 放行而本套件擋(空值、空 port、括號內非 hex、`%`、`,`、白名單外名稱、NBSP 包夾〔Hapi 先 `trim()`〕)走原 onRequest 路徑,行為不變。唯一不能維持 403 的是「非迴路又未設 allowedHosts」(刻意不檢查 Host)——格式異常者現由 Hapi 回 400 且不寫紀錄,屬 Hapi 先行驗證所致,見〈已知落差〉。`:authority` 與 Host 不符的 400 在 HTTP/1.1 listener 不可達(Node 解析器對 `:authority` 標頭名直接 400,Hapi 不會看到)。
+- **Node `http` 用戶端會把空的 Host 換成預設 Host**(`headers: { host: '' }` 實際送出 `127.0.0.1:port`):測空 Host 須用 `rawSocket` 送 `Host: \r\n`。
+- **變異執行器(用完即棄,未留存)**:以 Write 寫成單檔腳本,逐項把 src 的一段文字換掉(`from` 須恰出現一次)再跑受影響三檔,try/finally 還原被變異檔,全程 `quiet-run --lock`;跑完以 `git diff --stat` 核對 src 只剩預期差異。變異執行期間不要同時改 src／測試檔(執行器是在原檔上改)。「拿掉某行/某選項」的變異才抓得到「測試其實沒涵蓋該調適」;只改條件式的變異則驗證各分支案例。

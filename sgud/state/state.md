@@ -1,6 +1,6 @@
 # 現況(state)
 
-只記現況、不寫過程(過程見 `sgud/exp/experience.md`);藍圖見 `sgud/rule/rulebook.md`.最後更新:2026-10-30(a-screenctl:負載執行器改用 wsemi 1.9.33 統一版;src 零改動).`package.json` 版本 1.0.29(本輪未改版、未發布);相依已升 w-mousekey ^1.0.45、wsemi ^1.9.33.
+只記現況、不寫過程(過程見 `sgud/exp/experience.md`);藍圖見 `sgud/rule/rulebook.md`.最後更新:2026-11-12(ds-scr:相依 `@hapi/hapi` ^21.4.13 先行 Host 驗證之調適,SEC-14).`package.json` 版本 1.0.43(本輪未改版、未發布);相依 `@hapi/hapi` ^21.4.13、`joi` ^18.3.2(本輪未動 package.json).
 
 ## 功能狀態
 
@@ -11,7 +11,8 @@
 | 預設只綁本機 | 完成 | SEC-01 | `unit-security`、`api-security` R01、`api-security-g` | — |
 | Bearer token(定時比較)、`/health` 免 token、未註冊路徑 | 完成 | SEC-02/03 | `unit-security`、`api-security` R02~R04 | 未註冊路徑與預檢走 Hapi 特殊路由,無 token 時回 404 而非 401(無 handler 執行,已鎖定於測試) |
 | token 來源/自動產生/token 檔 | 完成 | SEC-09/11 | `unit-security`、`api-security` R09/R11、`api-security-g` | POSIX 0600 僅在 POSIX 驗(本機 Windows 測試略過 2 條);Windows 依資料夾 ACL(已載於 README/SECURITY) |
-| CORS 預設關、Origin 白名單、Host 檢查 | 完成 | SEC-04/05/06 | `api-security` R05/R06/R10、`api-security-g` | 非迴路綁定時 Host 不檢查(刻意,需 `allowedHosts` 才啟用) |
+| CORS 預設關、Origin 白名單、Host 檢查 | 完成 | SEC-04/05/06 | `api-security` R05/R06/R10、`api-security-g` | 非迴路綁定時 Host 不檢查(刻意,需 `allowedHosts` 才啟用);該情形下格式異常之 Host 由 Hapi 21.4.13 先行回 400 且不寫紀錄(見下列 SEC-14) |
+| Hapi 21.4.13 先行 Host 驗證之調適(格式異常 Host 仍為本套件 403 FORBIDDEN_HOST 並寫一筆操作紀錄) | 完成(2026-11-12):`gate.onPreResponse`(公開 API)＋`hostVerdict` 單一判定＋`Hapi.server({ info: { remote: true } })` | SEC-14、SEC-06、AUD-04/05 | `unit-security`(R06 五案)、`api-security`(R06 四案)、`api-audit`(A02/A03、A01/A02 三案) | 已知落差:非迴路又未設 `allowedHosts` 時 Hapi 對格式異常 Host 回 400 且不寫紀錄(只有 unit 覆蓋);`:authority` 不一致之 400 在 HTTP/1.1 listener 不可達;改用 HTTP/2 listener 須重評 |
 | `/chrome/evaluate` 預設關 | 完成(403 `EVALUATE_DISABLED`) | SEC-07 | `api-security` R07、`api-security-g` | — |
 | 非迴路綁定須 token 才啟動 | 完成 | SEC-08 | `unit-security`、`api-security` R08、`api-security-g` | 「非迴路 + token 實際綁定」不在測試實跑(Windows 防火牆對話框風險),僅 unit 覆蓋 |
 | 操作紀錄(預設開):每次控制動作與被拒絕請求各一行 JSONL,參數摘要不含機敏內容 | 完成(screenctl-run02) | AUD-01~05、AUD-07 | `unit-audit`、`api-audit`、`api-security-g` | 紀錄檔 0600/目錄 0700 僅在 POSIX 驗(本機 Windows 略過);輪替失敗時丟棄新紀錄(維持有界);非防竄改;來源 IP 為 socket 位址(不信 `X-Forwarded-For`) |
@@ -23,6 +24,7 @@
 
 ## 最近一次驗證
 
+- 2026-11-12(ds-scr,@hapi/hapi 21.4.13 跟跑調適):非瀏覽器全套(11 檔:`unit-security`、`unit-audit`、`api-security`、`api-audit`、`api-security-g`、`bootRoutes`、`chromeManager`、`chromeRss`、`errClassify`、`keyAlias`、`routeFactory`)修前 **296 passing / 4 pending / 2 failing**(`api-security` R06、`api-audit` A02)→ 修後 **310 passing / 4 pending / 0 failing**(+12 新案;`--no-parallel` 與 `--parallel` 皆同);受影響三檔(`unit-security`、`api-security`、`api-audit`)重跑 5 次皆 141 passing / 3 pending;新案對 HEAD 之 src 跑 11/12 轉紅(其餘 1 案為「Hapi 放行而本套件擋下」之不變行為,前後皆綠);變異 11/11 被抓到(M1 不註冊 `onPreResponse`、M2 一律放行、M3 不記 `app.denied`、M4 只判重複 Host、M5 拿掉 `info.remote`、M6 不限 400、M7 不看 Boom、M8 覆寫已拒絕者、M9 `onRequest` 只判重複 Host、M10 `hostCheck` 關閉仍檢查、M11 白名單放寬);eslint 對改動檔 0 error;`~/.w-screenctl` 不存在(AUD-08)。未跑:`momo.e2e`(有頭視窗＋外網)。
 - 2026-10-26(run02):11 個非瀏覽器測試檔(既有 6 + `unit-security` 43 + `api-security` 54 + `unit-audit` 58 + `api-audit` 34 + `api-security-g` 15)**297 passing / 4 pending**(皆 POSIX 專屬:token 檔 0600 ×2、紀錄檔 0600/0700 ×2);變異 70/70 被抓到(run01 的 29 + run02 的 41;N40 首輪存活,測試夾具強化後被抓到);L5 真 `node g.mjs` + headless Chrome + 唯讀系統級截圖 42/42;rollup 建置 + UMD smoke 通過;`npm pack --dry-run` 26 檔;外審 sol 16 條全屬實並已處理(#8、#9 部分採納).
 - 2026-10-26(run01):`unit-security`(43)+`api-security`(54)+`api-security-g`(10)+既有非瀏覽器測試(97)共 202 passing / 2 pending(POSIX 權限);變異 29/29;L5 22/22;外審 sol 16 條(15 採納修正,1 條範圍外).
 - 未跑:`momo.e2e`(有頭視窗+外網;已改 `auditLog:false`、`node --check` 通過).

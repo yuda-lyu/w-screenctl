@@ -17,7 +17,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { mock } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { rawRequest } from './tools/rawHttp.mjs'
+import { rawRequest, rawSocket } from './tools/rawHttp.mjs'
 import { makeHarness } from './tools/apiHarness.mjs'
 import { tapResponses, deferred, guard } from './tools/respTap.mjs'
 
@@ -618,6 +618,94 @@ describe('api-audit：操作紀錄與系統級開關', function() {
             const [e] = all
             assert.equal(e.path, '/probe/<redacted>')
             assert.ok(!fs.readFileSync(f2, 'utf8').includes(SHORT))
+            await H.stop(s)
+        })
+
+        // Hapi 21.4.13 起，格式不合 RFC 9112 3.2 之 Host 由 Hapi 於所有 onRequest 擴充之前即回 400（本套件之閘門 onRequest 與來源位址擴充都執行不到）；
+        // 契約不變：仍須恰記一筆 FORBIDDEN_HOST／403，欄位與 Hapi 升版前相同，token 全文不落檔。
+        const HAPI_REJECTED_HOSTS = [
+            `127.0.0.1:${P_DENY}@evil.example`,
+            `user:pw@127.0.0.1:${P_DENY}`,
+            `127.0.0.1:${P_DENY}, evil.example`,
+            'bad host',
+            `127.0.0.1:${P_DENY}/x`,
+            `127.0.0.1:${P_DENY}?token=${TOKEN}`,
+            `evil.example/${TOKEN}`,
+            `${TOKEN}#frag`,
+            '<x>',
+            '[::1',
+        ]
+        const DENY_KEYS = ['ts', 'method', 'path', 'ip', 'status', 'ms', 'ok', 'code', 'denied', 'host'].sort()
+
+        it('A02/A03 Hapi 先行擋下之格式不合 Host（含夾帶 token、帳密者）：每個請求恰記一筆 FORBIDDEN_HOST／403（host 記 <invalid>、來源位址照記），token 與帳密不落檔；其後合法 Host 之請求照常記錄', async () => {
+            for (const host of HAPI_REJECTED_HOSTS) {
+                const n0 = readLines(f).length
+                const r = await rawRequest({ port: P_DENY, path: '/chrome', headers: { ...auth(), host } })
+                assert.equal(r.status, 403, `Host=${JSON.stringify(host)}`)
+                assert.equal(r.json.code, 'FORBIDDEN_HOST')
+                const all = readEntries(f)
+                assert.equal(all.length, n0 + 1, `Host=${JSON.stringify(host)} 應恰記一筆`)
+                const e = all[n0]
+                assert.deepEqual(Object.keys(e).sort(), DENY_KEYS, `欄位集合（與 Hapi 升版前之 FORBIDDEN_HOST 紀錄相同）：${JSON.stringify(e)}`)
+                assert.equal(e.method, 'GET')
+                assert.equal(e.path, '/chrome')
+                assert.equal(e.status, 403)
+                assert.equal(e.ok, false)
+                assert.equal(e.code, 'FORBIDDEN_HOST')
+                assert.equal(e.denied, 'FORBIDDEN_HOST')
+                assert.equal(e.host, '<invalid>')
+                assert.equal(e.ip, '127.0.0.1')
+                assert.ok(Number.isFinite(e.ms) && e.ms >= 0)
+            }
+            const text = fs.readFileSync(f, 'utf8')
+            assert.ok(!text.includes(TOKEN) && !text.includes('pw@') && !text.includes('user:'), '紀錄檔洩漏 token 或帳密')
+            // 合法 Host 不受影響：200 並記一筆一般紀錄（非拒絕）
+            const n1 = readLines(f).length
+            const ok = await rawRequest({ port: P_DENY, path: '/chrome', headers: { ...auth(), host: `localhost:${P_DENY}` } })
+            assert.equal(ok.status, 200)
+            const all = readEntries(f)
+            assert.equal(all.length, n1 + 1)
+            assert.equal(all[n1].denied, undefined)
+            assert.equal(all[n1].status, 200)
+        })
+
+        it('A02/A03 重複的 Host 標頭且第一個格式不合（Hapi 先行 400）：恰記一筆 FORBIDDEN_HOST／403', async () => {
+            const n0 = readLines(f).length
+            const n = tap.expect(1)
+            const r = await rawSocket({ port: P_DENY, text: `GET /chrome HTTP/1.1\r\nHost: a@b\r\nHost: 127.0.0.1:${P_DENY}\r\nAuthorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n` })
+            await tap.waitSeen(n, '重複 Host 之請求')
+            assert.equal(r.status, 403)
+            const all = readEntries(f)
+            assert.equal(all.length, n0 + 1)
+            assert.equal(all[n0].denied, 'FORBIDDEN_HOST')
+            assert.equal(all[n0].status, 403)
+            assert.equal(all[n0].host, '<invalid>')
+        })
+
+        it('A01/A02 Host 格式不合之請求，連線在請求建立後即斷：仍恰記一筆，且來源位址取自請求建立時（Hapi 之 info.remote；該類請求不經本套件之 onRequest 擴充）', async () => {
+            // 排序不靠時間：以 request 裝飾（apply:true，於請求物件建立之後、生命週期之前同步執行）銷毀伺服器端 socket，
+            // 等於「請求一建立連線即斷」——此後 socket.remoteAddress 不可得。用 decorate 而非 server.ext，因實測啟動後才補掛的 onPreResponse
+            // 不會套到 Hapi 內建特殊路由（Host 被擋下之請求走的路由）。只有「請求建立時已取下位址」(info.remote) 的實作，紀錄才拿得到 ip
+            const f2 = path.join(fdTmp, 'early-abort.jsonl')
+            const s = await H.start({ port: P_PAR + 106, auditLogFile: f2, backend: makeBackend([]), chromeManager: makeChrome([]) })
+            const tap2 = tapResponses(s)
+            s.decorate('request', 'dsKillSocket', (request) => {
+                if (request.headers.host === 'a@b') request.raw.req.socket.destroy()
+                return null
+            }, { apply: true })
+            const req = http.request({ host: '127.0.0.1', port: P_PAR + 106, path: '/chrome', headers: { ...auth(), host: 'a@b' } })
+            req.on('error', () => {}) // 伺服器端銷毀連線之 ECONNRESET
+            req.end()
+            tap2.expect(1)
+            await tap2.waitSeen(1, '斷線之請求應發出 response 事件')
+            const barrier = await tap2.request({ port: P_PAR + 106, path: '/chrome', headers: auth() })
+            assert.equal(barrier.status, 200)
+            const all = readEntries(f2)
+            assert.equal(all.length, 2, `斷線之請求應恰一筆（另加屏障請求一筆）：${JSON.stringify(all)}`)
+            assert.equal(all[0].denied, 'FORBIDDEN_HOST')
+            assert.equal(all[0].status, 403)
+            assert.equal(all[0].ip, '127.0.0.1', '斷線後 socket 位址不可得，須取請求建立時記下之位址（未記下時 ip 為空字串）')
+            assert.equal(all[1].denied, undefined)
             await H.stop(s)
         })
 

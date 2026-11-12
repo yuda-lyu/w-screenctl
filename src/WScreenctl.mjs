@@ -94,6 +94,9 @@ async function WScreenctl(opt = {}) {
     const server = Hapi.server({
         port,
         host: sec.host,
+        // 來源位址於請求建立時即取下：Hapi 21.4.13 起 Host 格式不合者在所有 onRequest 擴充之前即被擋下（本套件之 auditIp 擴充執行不到），
+        // 該類請求之操作紀錄仍須記得來源位址（客戶端中途斷線後 socket 位址即不可得）
+        info: { remote: true },
         routes: {
             cors: sec.cors, // 預設 false（不輸出任何 CORS 標頭）；僅 allowedOrigins 非空時啟用白名單
             payload: { maxBytes: 10 * 1024 * 1024 },
@@ -122,6 +125,8 @@ async function WScreenctl(opt = {}) {
     // Host／Origin 檢查涵蓋一切請求。Hapi 內建之 notFound 與 CORS 預檢特殊路由不經 onPreAuth（只回 404／CORS 標頭，不執行 handler）
     server.ext('onRequest', gate.onRequest)
     server.ext('onPreAuth', gate.onPreAuth)
+    // Hapi 21.4.13 起先於 onRequest 擋下格式不合之 Host（400）：於回應階段改為本套件之 403 FORBIDDEN_HOST（契約不變）
+    server.ext('onPreResponse', gate.onPreResponse)
 
     if (audit) {
         server.ext('onPreHandler', (request, h) => {

@@ -419,13 +419,15 @@ export function checkBearer(authorization, expectedDigest) {
  *   - 其餘一律須 Bearer token（預設拒絕，不特別放行任何 method）
  *   - options.app.feature === 'evaluate' 且 evaluate 未開啟 → 403 EVALUATE_DISABLED
  *   - options.app.feature === 'system' 且系統級關閉（enableSystem=false）→ 403 SYSTEM_DISABLED
+ * onPreResponse（Hapi 21.4.13 起新增之 Host 格式驗證所需）：Hapi 在 onRequest 之前即以 400 擋下格式不合之 Host，
+ *   本套件之 onRequest 執行不到；此處把「Hapi 回 400 且本套件之 Host 判定為拒絕」的請求改為本套件之 403 FORBIDDEN_HOST（契約不變）
  * 每次拒絕都把原因碼記在 request.app.denied（操作紀錄用）
  * 注意：Hapi 內建之 notFound 與 CORS 預檢（OPTIONS）特殊路由不經 onPreAuth（server.ext 於建立後才註冊，
  * 不會重建特殊路由之生命週期；api-security 之預檢測試鎖定此行為）。預檢因此不需 token，且已受 onRequest 的 Origin／Host 檢查；
  * 它只回 CORS 標頭，不執行任何 handler。
  *
  * @param {Object} cfg resolveSecurity 之回傳
- * @returns {{onRequest: Function, onPreAuth: Function}}
+ * @returns {{onRequest: Function, onPreAuth: Function, onPreResponse: Function}}
  */
 export function createGate(cfg) {
     const digest = sha256(cfg.token)
@@ -443,16 +445,20 @@ export function createGate(cfg) {
         return n
     }
 
-    const onRequest = (request, h) => {
-        if (rawCount(request, 'host') > 1) {
-            return deny(request, h, 403, 'FORBIDDEN_HOST', 'forbidden: duplicate Host header')
-        }
+    // Host 判定之唯一擁有者（onRequest 與 onPreResponse 共用同一判定，兩處不會各執一詞）：
+    // 回傳拒絕訊息；null＝本套件放行此 Host
+    const hostVerdict = (request) => {
+        if (rawCount(request, 'host') > 1) return 'forbidden: duplicate Host header'
         if (cfg.hostCheck) {
             const name = parseHostHeader(request.headers.host)
-            if (name === null || !cfg.hostSet.has(name)) {
-                return deny(request, h, 403, 'FORBIDDEN_HOST', 'forbidden: Host header is not allowed')
-            }
+            if (name === null || !cfg.hostSet.has(name)) return 'forbidden: Host header is not allowed'
         }
+        return null
+    }
+
+    const onRequest = (request, h) => {
+        const why = hostVerdict(request)
+        if (why) return deny(request, h, 403, 'FORBIDDEN_HOST', why)
         // 請求之 Origin 與白名單逐字比對（瀏覽器送出的已是正規化小寫；白名單已於設定時正規化），檢查之值即使用之值
         const origin = request.headers.origin
         if (origin !== undefined && !origins.has(String(origin))) {
@@ -482,7 +488,21 @@ export function createGate(cfg) {
         return h.continue
     }
 
-    return { onRequest, onPreAuth }
+    // Hapi 21.4.13 起，Host 標頭格式不合 RFC 9112 3.2 者由 Hapi 自身在請求生命週期最前（早於所有 onRequest 擴充）回 400，
+    // 本套件之 onRequest 因此執行不到。此處於回應階段補上：Hapi 以 400 錯誤回應的請求，若依本套件自己之 Host 判定（hostVerdict）
+    // 應拒絕，則改為本套件之 403 FORBIDDEN_HOST 並記 request.app.denied（操作紀錄照常寫一筆）。
+    // 只用公開介面（request.response 之 Boom 狀態、request.headers），不讀 Hapi 私有欄位或錯誤訊息文字；
+    // 本套件判定放行者（含非迴路又未設 allowedHosts 而不檢查 Host 時）維持 Hapi 原回應，不改寫
+    const onPreResponse = (request, h) => {
+        const res = request.response
+        if (!res || !res.isBoom || !res.output || res.output.statusCode !== 400) return h.continue
+        if (request.app && request.app.denied) return h.continue
+        const why = hostVerdict(request)
+        if (!why) return h.continue
+        return deny(request, h, 403, 'FORBIDDEN_HOST', why)
+    }
+
+    return { onRequest, onPreAuth, onPreResponse }
 }
 
 /**

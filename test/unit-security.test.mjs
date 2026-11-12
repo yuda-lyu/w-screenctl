@@ -427,7 +427,11 @@ describe('unit-security', function() {
             method: o.method || 'get',
             route: { settings: { app: o.app || {} } },
             raw: o.rawHeaders ? { req: { rawHeaders: o.rawHeaders } } : undefined,
+            app: { ...(o.reqApp || {}) },
+            response: o.response,
         })
+        // Hapi 回應物件之替身：Boom 錯誤（isBoom、output.statusCode）
+        const boom = (statusCode) => ({ isBoom: true, output: { statusCode } })
 
         it('R06 非迴路 + allowedHosts：Host 不在名單 → 403；在名單 → 通過', () => {
             const g = createGate(resolveSecurity({ host: '0.0.0.0', token: TOK, allowedHosts: ['screenctl.lan'] }, {}))
@@ -441,6 +445,99 @@ describe('unit-security', function() {
             const g = createGate(resolveSecurity({ host: '0.0.0.0', token: TOK }, {}))
             assert.equal(g.onRequest(req({ headers: { host: 'anything.example' } }), h), h.continue)
             assert.equal(g.onRequest(req({ headers: {} }), h), h.continue)
+        })
+
+        // 以下 onPreResponse 各案：Hapi 21.4.13 起 Host 格式不合者由 Hapi 於所有 onRequest 擴充之前回 400，本套件之 onRequest 執行不到；
+        // 契約（spec：SEC-06「格式異常→403」）要求仍以本套件之 403 FORBIDDEN_HOST 與操作紀錄處理。
+        const HAPI_BAD_HOSTS = ['127.0.0.1:7000@evil.example', 'user@127.0.0.1:7000', '127.0.0.1:7000, evil.example', 'bad host', '127.0.0.1:7000/x', `evil.example/${TOK}`, 'a\tb', '[::1']
+
+        it('R06 onPreResponse：Hapi 以 400 擋下且本套件之 Host 判定為拒絕 → 改為 403 FORBIDDEN_HOST（本套件格式之本體）並記 app.denied', () => {
+            const g = createGate(resolveSecurity({ token: TOK }, {}))
+            for (const host of [...HAPI_BAD_HOSTS, undefined, '']) {
+                const q = req({ headers: { host }, response: boom(400) })
+                const r = g.onPreResponse(q, h)
+                assert.equal(r.status, 403, String(host))
+                assert.equal(r.taken, true)
+                assert.deepEqual(r.body, { ok: false, error: 'forbidden: Host header is not allowed', code: 'FORBIDDEN_HOST', retry: 'never' }, String(host))
+                assert.equal(q.app.denied, 'FORBIDDEN_HOST', String(host))
+            }
+        })
+
+        it('R06 onPreResponse：重複的 Host（原始標頭）且 Hapi 已以 400 擋下 → 403（訊息為 duplicate），不論 hostCheck 是否開啟', () => {
+            const dup = ['Host', 'a@b', 'Host', 'localhost']
+            for (const cfg of [{ token: TOK }, { host: '0.0.0.0', token: TOK }]) {
+                const g = createGate(resolveSecurity(cfg, {}))
+                const q = req({ headers: { host: 'a@b' }, rawHeaders: dup, response: boom(400) })
+                const r = g.onPreResponse(q, h)
+                assert.equal(r.status, 403, JSON.stringify(cfg))
+                assert.equal(r.body.code, 'FORBIDDEN_HOST')
+                assert.equal(r.body.error, 'forbidden: duplicate Host header')
+                assert.equal(q.app.denied, 'FORBIDDEN_HOST')
+            }
+        })
+
+        it('R06 onPreResponse：不碰本套件判定放行者（合法 Host 之 400，如 payload 破損）、非 400 之 Boom、非 Boom 回應、無回應、symbol 回應、已被閘門拒絕者', () => {
+            const g = createGate(resolveSecurity({ token: TOK }, {}))
+            // 合法 Host + Hapi 之 400（例如 payload 破損）：維持 Hapi 原回應
+            for (const host of ['127.0.0.1:7000', 'localhost', 'LOCALHOST:7000', '[::1]:7000']) {
+                const q = req({ headers: { host }, response: boom(400) })
+                assert.equal(g.onPreResponse(q, h), h.continue, host)
+                assert.equal(q.app.denied, undefined, host)
+            }
+            // 非 400 之 Boom、非 Boom 回應、無回應、close／abandon 之 symbol：即使 Host 不合格也不改寫（本調適只處理 Hapi 之 Host 驗證 400）
+            const bad = { host: 'a@b' }
+            for (const response of [boom(404), boom(401), boom(403), boom(500), { isBoom: false, statusCode: 400 }, { statusCode: 403 }, null, undefined, Symbol('close')]) {
+                const q = req({ headers: bad, response })
+                assert.equal(g.onPreResponse(q, h), h.continue, String(response && response.statusCode))
+                assert.equal(q.app.denied, undefined)
+            }
+            // 已被閘門拒絕者（原因碼已記）：不覆寫
+            const q = req({ headers: bad, response: boom(400), reqApp: { denied: 'FORBIDDEN_ORIGIN' } })
+            assert.equal(g.onPreResponse(q, h), h.continue)
+            assert.equal(q.app.denied, 'FORBIDDEN_ORIGIN')
+        })
+
+        it('R06 onPreResponse：非迴路未設 allowedHosts（刻意不檢查 Host）→ Hapi 之 400 維持原回應，不改寫', () => {
+            const g = createGate(resolveSecurity({ host: '0.0.0.0', token: TOK }, {}))
+            for (const host of HAPI_BAD_HOSTS) {
+                const q = req({ headers: { host }, response: boom(400) })
+                assert.equal(g.onPreResponse(q, h), h.continue, host)
+                assert.equal(q.app.denied, undefined, host)
+            }
+        })
+
+        it('R06 onRequest 與 onPreResponse 共用同一 Host 判定：同一組輸入、同一設定，兩者「拒絕與否」與訊息必須一致（三種設定 × 多種 Host × 有無重複標頭）', () => {
+            const cfgs = [
+                { token: TOK },
+                { token: TOK, allowedHosts: ['screenctl.lan', '[::2]'] },
+                { host: '0.0.0.0', token: TOK },
+                { host: '0.0.0.0', token: TOK, allowedHosts: ['screenctl.lan'] },
+            ]
+            const hosts = [...HAPI_BAD_HOSTS, undefined, '', 'localhost', '127.0.0.1:7000', 'LOCALHOST', '[::1]:7000', 'screenctl.lan', 'screenctl.lan:7000', '[::2]:7000', 'evil.example', '127.0.0.1:', '[zz]:80', 'a%41', 'a,b', '127.0.0.1\u00a0', '\u00a0127.0.0.1']
+            let denied = 0
+            let passed = 0
+            for (const cfg of cfgs) {
+                const g = createGate(resolveSecurity(cfg, {}))
+                for (const host of hosts) {
+                    for (const rawHeaders of [undefined, ['Host', String(host), 'Host', 'localhost']]) {
+                        const a = g.onRequest(req({ headers: { host }, rawHeaders }), h)
+                        const q = req({ headers: { host }, rawHeaders, response: boom(400) })
+                        const b = g.onPreResponse(q, h)
+                        const label = `${JSON.stringify(cfg)} host=${JSON.stringify(host)} dup=${!!rawHeaders}`
+                        if (a === h.continue) {
+                            assert.equal(b, h.continue, label)
+                            passed++
+                        }
+                        else {
+                            assert.equal(b.status, a.status, label)
+                            assert.deepEqual(b.body, a.body, label)
+                            assert.equal(q.app.denied, 'FORBIDDEN_HOST', label)
+                            denied++
+                        }
+                    }
+                }
+            }
+            assert.ok(denied > 40 && passed > 10, `組合覆蓋不足（拒絕 ${denied}、放行 ${passed}）`)
         })
 
         it('R05 Origin：無 Origin 通過；有 Origin 須與（已正規化之）白名單逐字相同，否則 403（大小寫不同、尾斜線、預設 port 寫法皆拒）', () => {

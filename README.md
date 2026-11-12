@@ -179,7 +179,7 @@ const server = await WScreenctl({ port: 7000, token: process.env.MY_TOKEN })
 | 403 | `EVALUATE_DISABLED` | 呼叫 `/chrome/evaluate` 但未開啟（需先通過 token 驗證） |
 | 403 | `SYSTEM_DISABLED` | 呼叫系統級端點（`/screenshot`、`/mouse/*`、`/keyboard/*`）但已以 `enableSystem: false` 關閉（需先通過 token 驗證） |
 
-**綁非迴路位址（不建議）**：token 以明文走 HTTP，且 `Host` 不檢查（除非設 `allowedHosts`）。請改用 SSH 通道或 TLS 反向代理，並以防火牆限制來源。能呼叫者等同取得主機之鍵鼠與 Chrome 控制權（含 `file://` 讀取與有頭 Chrome 之任意操作），請視 token 為主機密碼。
+**綁非迴路位址（不建議）**：token 以明文走 HTTP，且 `Host` 不檢查（除非設 `allowedHosts`；惟 `@hapi/hapi` 21.4.13 起對格式不合 RFC 9112 之 `Host` 本身即回 `400`，與此檢查無關）。請改用 SSH 通道或 TLS 反向代理，並以防火牆限制來源。能呼叫者等同取得主機之鍵鼠與 Chrome 控制權（含 `file://` 讀取與有頭 Chrome 之任意操作），請視 token 為主機密碼。
 
 ### 操作紀錄（audit log）
 

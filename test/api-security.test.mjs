@@ -217,6 +217,107 @@ describe('api-security：預設安全', function() {
             }
         })
 
+        // Hapi 21.4.13 起，格式不合 RFC 9112 3.2 之 Host 由 Hapi 於所有 onRequest 擴充之前即回 400（本套件之 onRequest 執行不到）；
+        // 契約（spec：SEC-06「格式異常→403」）不變：仍須為本套件之 403 FORBIDDEN_HOST（本套件格式之本體）。
+        // 下列各項皆經實測會被 Hapi 21.4.13 先行擋下（tmp 探針：onRequest 擴充未被呼叫、Boom 400「Invalid host header」）
+        const HAPI_REJECTED_HOSTS = [
+            `127.0.0.1:${P_DEFAULT}@evil.example`, // userinfo 在後
+            `user@127.0.0.1:${P_DEFAULT}`, // userinfo 在前
+            `127.0.0.1:${P_DEFAULT}, evil.example`, // 多值（逗號 + 空白）
+            'bad host', // 空白
+            'a\tb', // 字元中間的 HTAB
+            `127.0.0.1:${P_DEFAULT}/x`, // 路徑
+            `127.0.0.1:${P_DEFAULT}?x=1`, // 查詢字串
+            'a#b', // 片段
+            'evil.example\\x', // 反斜線
+            '<x>', // 角括號
+            '"quoted"', // 引號
+            'a|b',
+            'a^b',
+            'a`b',
+            'a{b}',
+            '[::1', // IPv6 括號未閉合
+            `evil.example/${TOKEN}`, // 夾帶 token 之載體
+            'évil.example', // 非 ASCII（Latin-1 位元組）
+        ]
+
+        it('R06 Hapi 先行擋下之各類格式不合 Host → 仍為本套件之 403 FORBIDDEN_HOST（本套件格式之本體；有無 token 皆同；GET／POST／OPTIONS 皆同）', async () => {
+            for (const host of HAPI_REJECTED_HOSTS) {
+                for (const [label, headers] of [['有 token', auth()], ['無 token', {}], ['錯 token', auth('wrong-token-0123456789abcdef-XY')]]) {
+                    const r = await rawRequest({ port: P_DEFAULT, path: '/chrome', headers: { ...headers, host } })
+                    assert.equal(r.status, 403, `${label} Host=${JSON.stringify(host)}`)
+                    assert.deepEqual(r.json, { ok: false, error: 'forbidden: Host header is not allowed', code: 'FORBIDDEN_HOST', retry: 'never' }, `本體須為本套件格式（非 Hapi 之 statusCode／message）：${JSON.stringify(host)}`)
+                    assert.ok(!r.text.includes(TOKEN), '回應本體不得回顯 token')
+                }
+                const post = await rawRequest({ port: P_DEFAULT, method: 'POST', path: '/chrome/navigate', body: { url: 'about:blank' }, headers: { ...auth(), host } })
+                assert.equal(post.status, 403, `POST Host=${JSON.stringify(host)}`)
+                assert.equal(post.json.code, 'FORBIDDEN_HOST')
+                const opt = await rawRequest({ port: P_DEFAULT, method: 'OPTIONS', path: '/chrome/open', headers: { host, 'origin': EVIL, 'access-control-request-method': 'POST' } })
+                assert.equal(opt.status, 403, `OPTIONS Host=${JSON.stringify(host)}`)
+                assert.equal(opt.json.code, 'FORBIDDEN_HOST')
+                assert.equal(opt.headers['access-control-allow-origin'], undefined)
+            }
+        })
+
+        it('R06 重複的 Host 標頭，第一個即格式不合（Hapi 先行 400）→ 403；第一個合法第二個格式不合（Hapi 放行）→ 403', async () => {
+            const mk = (...hosts) => `GET /chrome HTTP/1.1\r\n${hosts.map((x) => `Host: ${x}\r\n`).join('')}Authorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n`
+            for (const hosts of [[`a@b`, `127.0.0.1:${P_DEFAULT}`], [`127.0.0.1:${P_DEFAULT}`, 'a@b'], ['a@b', 'a@b'], [`127.0.0.1:${P_DEFAULT}`, `127.0.0.1:${P_DEFAULT}`]]) {
+                const r = await rawSocket({ port: P_DEFAULT, text: mk(...hosts) })
+                assert.equal(r.status, 403, hosts.join(' + '))
+                assert.equal(r.json.code, 'FORBIDDEN_HOST')
+            }
+        })
+
+        it('R06 Hapi 放行而本套件擋下之 Host（空值、空 port、括號內非 IPv6 字元、%、逗號、白名單外名稱）→ 403 FORBIDDEN_HOST（走 onRequest，行為與 Hapi 升版前相同）', async () => {
+            for (const host of [`127.0.0.1:`, '[zz]:80', 'a%41', 'a,b', 'evil.example', `evil.example:${P_DEFAULT}`, '[::2]:80', `127.0.0.1:${P_DEFAULT}\u00a0`]) {
+                const r = await rawRequest({ port: P_DEFAULT, path: '/chrome', headers: { ...auth(), host } })
+                assert.equal(r.status, 403, `Host=${JSON.stringify(host)}`)
+                assert.equal(r.json.code, 'FORBIDDEN_HOST')
+            }
+            // 空 Host：node:http 用戶端會把空值換成預設 Host，故以原始 TCP 送出
+            const empty = await rawSocket({ port: P_DEFAULT, text: `GET /chrome HTTP/1.1\r\nHost: \r\nAuthorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n` })
+            assert.equal(empty.status, 403)
+            assert.equal(empty.json.code, 'FORBIDDEN_HOST')
+        })
+
+        it('R06 契約全表：結構化 + 固定種子隨機之 Host 樣本，結果只有兩種——本機名稱（含 0~5 位數 port）→ 200，其餘一律 403 FORBIDDEN_HOST（不論 Hapi 是否先行擋下；絕無 400）', async () => {
+            // 預期值由本測試自己的獨立規則算出（不呼叫 parseHostHeader）：SP／HTAB 外圍空白由 Node 剝除後，須完全符合 本機名稱[:1~5 位數 port]
+            const expect200 = (h) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?$/i.test(h.replace(/^[ \t]+|[ \t]+$/g, ''))
+            const names = ['localhost', 'LocalHost', '127.0.0.1', '127.0.0.2', 'a_b', 'a-b.c', '0', 'a.', '-a', 'a%41', 'a,b', 'a~b', 'a!b', 'a$b', 'a\'b', 'a(b)', 'a*b', 'a+b', 'a;b', 'a=b', 'a&b', 'a b', 'a@b', 'a/b', 'evil.example']
+            const ports = ['', ':', ':0', ':80', ':65535', ':99999', ':123456', ':a', ':1:2']
+            const brackets = ['[::1]', '[::]', '[fe80::1%25eth0]', '[1:2:3:4:5:6:7:8]', '[::ffff:1.2.3.4]', '[zz]', '[]', '[::1', '::1]', '[a.b]', '[~]']
+            const samples = new Set()
+            for (const a of [...names, ...brackets]) for (const p of ports) samples.add(a + p)
+            samples.add('')
+            let seed = 20261112 // LCG，固定種子：樣本每次相同
+            const rnd = () => {
+                seed = (seed * 1664525 + 1013904223) % 4294967296
+                return seed / 4294967296
+            }
+            const ALPHA = 'abcdefzAZ0123456789.-_:[]%@, /~!$&\'()*+;=\t<>"|^`{}\\#?'
+            for (let i = 0; i < 300; i++) {
+                let n = 1 + Math.floor(rnd() * 10)
+                let s = ''
+                while (n--) s += ALPHA[Math.floor(rnd() * ALPHA.length)]
+                samples.add(s)
+            }
+            let ok200 = 0
+            let ok403 = 0
+            for (const host of samples) {
+                const r = await rawSocket({ port: P_DEFAULT, text: `GET /chrome HTTP/1.1\r\nHost: ${host}\r\nAuthorization: Bearer ${TOKEN}\r\nConnection: close\r\n\r\n` })
+                if (expect200(host)) {
+                    assert.equal(r.status, 200, `Host=${JSON.stringify(host)}`)
+                    ok200++
+                }
+                else {
+                    assert.equal(r.status, 403, `Host=${JSON.stringify(host)}`)
+                    assert.equal(r.json && r.json.code, 'FORBIDDEN_HOST', `Host=${JSON.stringify(host)}`)
+                    ok403++
+                }
+            }
+            assert.ok(ok200 >= 20 && ok403 >= 300, `樣本分佈不足（200：${ok200}；403：${ok403}）`)
+        })
+
         it('R06 本機名稱 Host（127.0.0.1 / localhost / [::1]，含或不含 port）→ 通過', async () => {
             for (const host of [`127.0.0.1:${P_DEFAULT}`, '127.0.0.1', `localhost:${P_DEFAULT}`, `LOCALHOST:${P_DEFAULT}`, `[::1]:${P_DEFAULT}`]) {
                 const r = await rawRequest({ port: P_DEFAULT, path: '/chrome', headers: { ...auth(), host } })
