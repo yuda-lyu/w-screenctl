@@ -1,13 +1,13 @@
 {
   "name": "w-screenctl",
-  "version": "1.0.44",
+  "version": "1.0.45",
   "main": "dist/w-screenctl.umd.js",
   "dependencies": {
     "@hapi/hapi": "^21.4.13",
     "joi": "^18.3.2",
     "playwright": "^1.64.1",
-    "w-mousekey": "^1.0.60",
-    "wsemi": "^1.9.58"
+    "w-mousekey": "^1.0.61",
+    "wsemi": "^1.9.59"
   },
   "devDependencies": {
     "w-package-tools": "^1.1.28"
