@@ -22,7 +22,7 @@ npm i w-screenctl
 
 | 平台 | 必裝 | 用途 |
 |---|---|---|
-| 全部 | Google Chrome | `/chrome/*` 走 Playwright `channel: 'chrome'`，需系統實機 Chrome |
+| 全部 | Google Chrome | `/chrome/*` 經自有套件 `w-playwright` 以 Playwright `channel: 'chrome'` 啟動系統實機 Chrome（須自行安裝；見下方〈瀏覽器之取得與啟動〉） |
 | Linux | `xdotool`、`imagemagick` | 系統級 mouse/keyboard、`/screenshot` |
 | Windows | 無額外需求 | `w-mousekey` 已含 AHK 64-bit |
 
@@ -34,7 +34,38 @@ sudo apt install xdotool imagemagick
 sudo dnf install xdotool ImageMagick
 ```
 
+### 瀏覽器之取得與啟動（w-playwright）
+
+`/chrome/*` 一律經自有套件 `w-playwright`（`launchChromiumPersistent`）啟動瀏覽器，本套件不直接依賴 `playwright`／`playwright-core`：
+
+1. **安裝即帶入 `playwright-core` 1.64.1**（經 `w-playwright` 之精確版本）。使用端不需、也不應另裝 `playwright` 或 `playwright-core`；實裝版本與 `w-playwright` 內附之預設清單不符（例如以 overrides 換了版本）時，`/chrome/open` 拒絕啟動（`error`：`playwright-core version … does not match the bundled defaults table …`）。
+2. **須安裝 Google Chrome**：服務本身只以 `channel: 'chrome'` 啟動系統實機 Chrome，**不使用** Playwright 受管之瀏覽器（headless shell、Chromium），執行服務不需下載任何瀏覽器，也不要另以 Playwright 之命令列工具安裝（本套件用不到；依賴樹中他版 Playwright 被提升時還會下載到不同版本）。Chrome 之位置可用 `w-playwright` 之 `findSystemChrome()` 確認（只判檔案存在，不啟動）。
+3. **離線**：執行服務之目標機只需已安裝 Google Chrome，不需 Playwright 之瀏覽器資料夾，亦不需設定 `PLAYWRIGHT_BROWSERS_PATH`。
+4. **跑本套件之測試**（`npm test`）另需 Playwright 受管之 headless shell（`test/api-chromeLaunch.test.mjs` 之真路徑案以之真啟動一次；未安裝時該案 skip）：以 `w-playwright` 取得——`import wpw from 'w-playwright'; await wpw.ensureChromium()`。離線時於可連網之機器以同版 `w-playwright` 執行 `ensureChromium()`，把 Playwright 之瀏覽器資料夾（Windows 預設 `%LOCALAPPDATA%\ms-playwright` 內之 `chromium_headless_shell-1248`）複製至目標機，並以 `PLAYWRIGHT_BROWSERS_PATH` 指向該資料夾（**須在載入 `w-playwright` 之前設定**）。`test/momo.e2e.test.mjs` 則以有頭真 Chrome 連外網。
+5. **守門參數（一律加入，無法關閉）**：Windows 上 Chrome 153 起，每啟動一個新的瀏覽器根行程，即以無效密碼替目前使用者呼叫一次 `LogonUser`（安全性紀錄 4625、錯誤密碼次數 +1；本機原則常為 10 分鐘內 10 次即鎖定帳號）；停用 Chromium 功能 `AutofillAiWalletPrivatePasses` 即不再發生。Chromium 對多個 `--disable-features` 只取最後一個，故 `w-playwright` 於每次啟動之命令列**恰給一個** `--disable-features`，其值為「Playwright 預設清單、`AutofillAiWalletPrivatePasses`、本套件自給之 `Translate`」之去重聯集（Playwright 1.64.1 之預設清單本即含 `Translate`，故實際只出現一次）。
+6. **不支援之環境變數**：`PWDEBUG`（inspector 模式）、`SELENIUM_REMOTE_URL` 會使守門參數失效，設定時凡需啟動 Chrome 之 `/chrome/open`（尚未開啟，或 `mode: 'replace'`）一律失敗（`error`：`unsupported environment: PWDEBUG` 等；`replace` 時舊頁已先關閉）；已開啟而重用者不啟動，照常回應。
+7. **選用之執行期登入守門**：環境變數 `W_PLAYWRIGHT_LOGON_GUARD=1` 時，`w-playwright` 於每次啟動 Chrome 前讀目前 Windows 使用者之錯誤密碼次數，≥1、帳號已鎖或讀不到即拒絕（`error`：`logon guard: …, launch refused`）。預設關，供須於啟動「之前」擋下之環境（如連動測試）使用；**只應在 Windows 開啟**——非 Windows 讀不到此計數，開啟後每次啟動 Chrome 皆被拒絕。細節見 `w-playwright` 之 README。
+
 ## Upgrade Notes
+
+### 改經 w-playwright 啟動 Chrome（行為變更；1.0.45 之後的版本起）
+
+| 項目 | 舊行為 | 新行為 |
+|---|---|---|
+| 依賴 | `playwright`（^1.64.1） | `w-playwright`（帶入 `playwright-core` 精確 1.64.1）；不再依賴 `playwright` |
+| 命令列之 `--disable-features` | 本套件自給之 `--disable-features=Translate` 排在 Playwright 預設那一串之後，Chromium 只取最後一串，**Playwright 之預設停用清單（18 項）整串失效**，且 Windows 上 Chrome 153 起每次啟動即累計一次錯誤密碼 | 恰一串：Playwright 預設 18 項（本即含 `Translate`）＋`AutofillAiWalletPrivatePasses`。Playwright 之預設停用項恢復停用（如 `HttpsUpgrades`〔Chrome 將 http 導覽自動改走 https 之功能〕、`MediaRouter`、`PaintHolding`、`OptimizationHints`、`DestroyProfileOnBrowserClose` 等），錯誤密碼不再累計 |
+| 啟動失敗之 `error`（`POST /chrome/open` 回應、`GET /chrome` 之 `lastError`、服務端 console） | Playwright 原訊息（含命令列與設定檔路徑） | `w-playwright` 之固定詞彙：`browser launch failed`、`browser launch timed out`、`unsupported environment: …`、`playwright-core version … does not match …`、`logon guard: …`；本套件自己的 20 秒啟動期限照舊回 `launchPersistentContext timeout 20000ms` |
+| 啟動失敗之 `code`／`retry` | 依 Playwright 原訊息分類：逾時 `TIMEOUT`／`after_1s`；瀏覽器啟動即結束（訊息含 `Target page, context or browser has been closed`）`CHROME_NOT_OPEN`／`after_recovery`；其餘 `UNKNOWN`／`never` | 分類規則未改，但輸入改為固定詞彙：逾時仍為 `TIMEOUT`／`after_1s`；**瀏覽器啟動即結束改為 `UNKNOWN`／`never`**（與其他失敗同為 `browser launch failed`）；其餘 `UNKNOWN`／`never` |
+| 環境變數 `PWDEBUG`（inspector）、`SELENIUM_REMOTE_URL` | 照常啟動 | 需啟動 Chrome 之 `/chrome/open`（尚未開啟或 `mode: 'replace'`）失敗；已開啟而重用者照常 |
+| 環境變數 `W_PLAYWRIGHT_LOGON_GUARD` | 無作用 | 開啟時每次啟動前讀錯誤密碼次數，非 0 即拒絕（只應在 Windows 開啟；非 Windows 開啟即一律拒絕） |
+| 其餘（端點、payload、回應格式、user data 資料夾） | | 不變（user data 之相對路徑先由本套件以工作目錄轉為絕對路徑再交給 `w-playwright`，絕對路徑原字串照交，與 Playwright 原本之處理相同） |
+
+升級時要做的事：
+
+1. 確認已安裝 Google Chrome；專案內若只為本套件而裝 `playwright`，可移除。
+2. 不要在執行本服務之環境設定 `PWDEBUG`（inspector 值）或 `SELENIUM_REMOTE_URL`。
+3. 以 `error` 文字判斷啟動失敗原因之呼叫端，改判上表之固定詞彙或 `code`／`retry`；原錯誤細節不再回傳。依 `retry: 'after_recovery'` 對「瀏覽器啟動即結束」自動重試者，現收到 `never`，需自行決定是否重試。
+4. 依賴「Playwright 預設停用項未被停用」之行為者（例如以 http 網址開啟而期待 Chrome 自動改走 https），請自行處理（本項依功能名推論，未逐項實測）。
 
 ### 預設安全化（破壞性變更；1.0.26 之後的版本起）
 

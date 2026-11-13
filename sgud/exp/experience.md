@@ -57,3 +57,18 @@
 - **hapi 比本套件更寬/更嚴**:Hapi 的 `hostRx` 為 `^(?:\[[\w:.%~-]+\]|[\w.~!$&'()*+,;=%-]*)(?::\d*)?$`;本套件 `HOST_HEADER_RE` 的字元集與 port 形式皆為其子集 → 本套件放行者 Hapi 必放行(實證:兩者差異見 rulebook SEC-14 表)。Hapi 放行而本套件擋(空值、空 port、括號內非 hex、`%`、`,`、白名單外名稱、NBSP 包夾〔Hapi 先 `trim()`〕)走原 onRequest 路徑,行為不變。唯一不能維持 403 的是「非迴路又未設 allowedHosts」(刻意不檢查 Host)——格式異常者現由 Hapi 回 400 且不寫紀錄,屬 Hapi 先行驗證所致,見〈已知落差〉。`:authority` 與 Host 不符的 400 在 HTTP/1.1 listener 不可達(Node 解析器對 `:authority` 標頭名直接 400,Hapi 不會看到)。
 - **Node `http` 用戶端會把空的 Host 換成預設 Host**(`headers: { host: '' }` 實際送出 `127.0.0.1:port`):測空 Host 須用 `rawSocket` 送 `Host: \r\n`。
 - **變異執行器(用完即棄,未留存)**:以 Write 寫成單檔腳本,逐項把 src 的一段文字換掉(`from` 須恰出現一次)再跑受影響三檔,try/finally 還原被變異檔,全程 `quiet-run --lock`;跑完以 `git diff --stat` 核對 src 只剩預期差異。變異執行期間不要同時改 src／測試檔(執行器是在原檔上改)。「拿掉某行/某選項」的變異才抓得到「測試其實沒涵蓋該調適」;只改條件式的變異則驗證各分支案例。
+
+## 改經 w-playwright 啟動 Chrome(2026-11-13 pm-sc;規則見 rulebook〈PW-xx〉)
+
+- **啟動會帳號鎖定之風險**:Windows 上 Chrome 153 起每啟動一次即累計一次錯誤密碼(10 分鐘 10 次鎖帳號)。本套件之真 Chrome 啟動只有 `chromeManager._launch` 一處,測試裡只有 `momo.e2e`(有頭＋外網)。凡會啟動真 Chrome／Edge／完整 Chromium 者,前後以 `cscript //nologo <badpw.js> <帳號>` 讀錯誤次數;agent 不自跑 `momo.e2e`。
+- **接線測試之寫法**:`wpw.setBrowserTypeForTest({ launch, launchPersistentContext })` 之替身收到的是 w-playwright **合併後**之選項,故斷言「恰一個 `--disable-features`、為最後元素、含 `getPlaywrightInfo().defaultDisableFeatures`＋`guardFeatures`＋`Translate`」;每案斷言替身呼叫次數(依賴樹有兩份 w-playwright 時替身可能空過)。真路徑以替身之 `next({ ...o, channel: undefined, headless: true })` 交回 w-playwright 真啟動 **headless shell**(不觸發 LogonUser);替身之 fake page 沒有 `screenshot`,截圖成功即證明拿到真 context。
+- **`W_PLAYWRIGHT_LOGON_GUARD=1` 時替身路徑仍會讀錯誤次數**:w-playwright 之 `prepare` 先做登入守門再呼叫替身(`channel:'chrome'` 屬非 headless shell),每次約 0.1 秒(cscript)。次數 ≥1 時接線測試以 `E_LOGON_GUARD` 失敗——是應停止之訊號,不放寬。不得覆寫該環境變數,故 `E_LOGON_GUARD` 一格無測試。
+- **`PWDEBUG`／`SELENIUM_REMOTE_URL` 可於測試內暫設再還原**:w-playwright 每次呼叫時讀 `process.env`(`PWDEBUG` 另有載入時快照,載入時未設即不影響);替身 0 次、`E_ENV`。`mocha --parallel` 之 worker 會重用,須 `finally` 還原。
+- **只驗合併後之選項,`Translate` 會成等價變異**:Playwright 1.64.1 之預設停用 18 項本即含 `Translate`,拿掉本套件自給之 `--disable-features=Translate` 時合併後結果不變。要鎖住本套件之意圖,另以測試端包裝 `wpw.launchChromiumPersistent`(記錄後照常轉呼叫、`finally` 還原;主檔匯出物件可寫)斷言**合併前**之 `args`(外審 terra F7)。舊碼之 bug 是「自給一串蓋掉 Playwright 那一串」(只剩 `Translate`,其餘 17 項與守門皆失效)。
+- **修前紅之安全作法**:新測試對 HEAD 版 `chromeManager.mjs` 跑之前,先在副本位置以 `import.meta.resolve('playwright')` 確認**無法解析**(`npm uninstall playwright` 後);可解析時 HEAD 碼會直接以 playwright 啟動真 Chrome,不得跑。變異一律以替身 context 模擬「不經 w-playwright」,不寫直接呼叫 playwright-core 之變異。
+- **`userDataDir` 只解析相對路徑**:w-playwright 介面要求非空 `userDataDir` 為絕對路徑;Playwright 用戶端原本是「絕對路徑原字串照交、相對路徑 `path.resolve`」(`coreBundle.js:64856`)。一律 `path.resolve` 會把絕對路徑之 `..` 字面正規化(POSIX 含符號連結時與檔案系統之解析不同)、Windows 斜線改向,故比照用戶端只解析相對路徑(外審 terra F3;變異 M8 由「絕對路徑原字串照交」案抓到)。
+- **遷移使錯誤分類改變**:`errClassify` 規則不變,但輸入由 Playwright 原訊息改為固定詞彙,原本命中 `Target … closed` 之「瀏覽器啟動即結束」由 `CHROME_NOT_OPEN`/`after_recovery` 變為 `UNKNOWN`/`never`。改錯誤訊息來源時,逐條比對分類規則之正則對新舊訊息之命中(外審 terra F4)。
+- **dist 之驗證**:舊 `dist` 仍 `require("playwright")`(雙引號;以單引號 grep 會得 0 而誤判);以副本並指定 cwd 執行 `toolg/gDistRollup.mjs` 建出後,`createRequire` 載入 dist 正式入口,與測試同一份 `w-playwright`(同解析路徑即同模組實例)之 `setBrowserTypeForTest` 對 dist 亦生效,可不啟動瀏覽器驗接線。
+- **真瀏覽器 e2e 之清理**:`DELETE /chrome` 失敗被吞掉再 `server.stop()` 會留下 Chrome;以 `WScreenctl({ chromeManager })` 傳入測試持有之實例,`after` 先 `shutdown()`(排空佇列並等關閉)再停服務。事後讀錯誤次數放 `after`(以「嘗試過啟動」為條件),末案可能因 `before` 失敗而不執行(外審 terra F5、F6)。
+- **錯誤字樣改為固定詞彙**:w-playwright 不把 Playwright 原錯誤附在對外錯誤上(只交 `funLog`);本套件不傳 `funLog`,服務端 console 與 HTTP `error` 皆只見 `browser launch failed` 等。`errClassify` 之 `/timeout|timed?\s?out/` 仍把 `browser launch timed out` 判為 `TIMEOUT`。
+- **`npm pack` 檔數**:`.npmignore` 已移除(`ebd0010`),打包含 `test/`、`docs/`;舊 state 之「26 檔」已過時。

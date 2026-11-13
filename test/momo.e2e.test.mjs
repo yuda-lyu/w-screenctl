@@ -3,9 +3,18 @@
 // 跟其他單元測試一起跑（mocha 自動撿到此檔）。
 // before/after hooks 確保不論 it 成敗都會關 chrome 與停 server。
 // 截圖以 buffer 在記憶體驗證大小，不落地（依專案 CLAUDE.md 全域規範）。
+//
+// 真 Chrome（有頭）之啟動本檔只有一次：before 起（POST /chrome/open）、after 關（本測試持有之 ChromeManager 之 shutdown，等關閉完成後才停服務）；
+// it 失敗或重試皆不再啟動。
+// 啟動經 w-playwright（src/chromeManager.mjs）：命令列一律帶守門參數，使 Windows 上 Chrome 不再以錯誤密碼呼叫 LogonUser。
+// Windows：啟動前讀錯誤密碼次數（w-playwright 隨包發布之 readBadPassword，與其執行期登入守門同一讀法），
+// 不可讀或非 0 即不啟動（整檔略過；略過不算通過，等其歸零〔最後一次失敗 10 分鐘後〕再跑）；
+// 關閉後再讀須與啟動前相同（端到端不變式）：末案於流程中斷言，after 另於「嘗試過啟動」時一律再比對（before 失敗或中途停止時末案不會執行）。
 
 import assert from 'node:assert/strict'
+import readBadPassword from 'w-playwright/test/tools/readBadPassword.mjs'
 import WScreenctl from '../src/WScreenctl.mjs'
+import ChromeManager from '../src/chromeManager.mjs'
 
 const PORT = parseInt(process.env.E2E_PORT || '8080', 10)
 const TARGET_URL = 'https://www.momoshop.com.tw/main/Main.jsp'
@@ -41,30 +50,63 @@ async function api(method, urlPath, body) {
 describe('e2e: chrome 開→ momo →截圖→關', function() {
     this.timeout(60000)
 
-    let server
+    let server = null
+    let cm = null // 本測試持有之 Chrome 管理器（與服務內建者同一類別；after 以 shutdown 確實關閉）
+    let openRes = null // 本檔唯一一次啟動之回應（before 內取得，由第一案斷言）
+    let launchAttempted = false
+    let bad0 = null // Windows：啟動前之錯誤密碼次數
 
-    before(async () => {
+    before(async function() {
+        if (process.platform === 'win32') {
+            const b = await readBadPassword()
+            if (!b.ok || b.bad !== 0) {
+                this.skip() // 錯誤密碼次數不可讀或非 0：不啟動真 Chrome（試跑紀律）
+            }
+            bad0 = b.bad
+        }
+        cm = new ChromeManager()
         // auditLog:false：本測試不驗操作紀錄，且預設紀錄檔位於使用者目錄
         // enableEvaluate：僅供測試端讀 document.readyState 判斷頁面是否載入完成（見渲染等待案）；本服務只綁本機且須 token
-        server = await WScreenctl({ port: PORT, token: TOKEN, auditLog: false, enableEvaluate: true })
-    })
-
-    after(async () => {
-        // 不論 it 成敗都要清理：先關 chrome，再停 server
-        try { await api('DELETE', '/chrome') }
-        catch {}
-        if (server) {
-            try { await server.stop({ timeout: 5000 }) }
-            catch {}
-        }
-    })
-
-    it('POST /chrome/open momo 首頁 → state=open + gotoOk', async () => {
-        const r = await api('POST', '/chrome/open', {
+        // chromeManager：傳入本測試持有之實例（WScreenctl 之進階選項），after 才能等它關閉完成
+        server = await WScreenctl({ port: PORT, token: TOKEN, auditLog: false, enableEvaluate: true, chromeManager: cm })
+        // 本檔唯一一次啟動（有頭真 Chrome）
+        launchAttempted = true
+        openRes = await api('POST', '/chrome/open', {
             url: TARGET_URL,
             window: { x: 0, y: 0, width: 1280, height: 800 },
             opt: { headless: false }, // 本案驗有頭視窗流程；/chrome/open 預設為 headless
         })
+    })
+
+    after(async () => {
+        // 不論 it 成敗都要清理：先關 chrome（shutdown 排空佇列並等關閉完成），再停 server；清理失敗不吞掉，最後一併拋出
+        // （before 略過而未建立者不動，免打到占用同埠之他服務）
+        const errs = []
+        try {
+            if (cm) await cm.shutdown()
+        }
+        catch (e) {
+            errs.push(e)
+        }
+        try {
+            if (server) await server.stop({ timeout: 5000 })
+        }
+        catch (e) {
+            errs.push(e)
+        }
+        // 嘗試過啟動者一律再讀錯誤密碼次數（末案可能因 before 失敗或中途停止而未執行）
+        if (launchAttempted && process.platform === 'win32') {
+            const b1 = await readBadPassword()
+            if (!b1.ok || b1.bad !== bad0) {
+                errs.push(new Error(`錯誤密碼次數由 ${bad0} 變為 ${b1.ok ? b1.bad : '不可讀'}：立即停止一切真 Chrome 之啟動並回報`))
+            }
+        }
+        if (errs.length === 1) throw errs[0]
+        if (errs.length > 1) throw new AggregateError(errs, 'momo e2e 清理失敗')
+    })
+
+    it('POST /chrome/open momo 首頁 → state=open + gotoOk', async () => {
+        const r = openRes // 啟動於 before（本檔唯一一次）
         assert.equal(r.ok, true, `open failed: ${r.error}`)
         assert.equal(r.state, 'open')
         assert.equal(r.gotoOk, true, `goto failed: ${r.gotoError}`)
@@ -104,6 +146,15 @@ describe('e2e: chrome 開→ momo →截圖→關', function() {
 
         const status = await api('GET', '/chrome')
         assert.equal(status.state, 'closed')
+    })
+
+    it('Windows：啟動真 Chrome 前後錯誤密碼次數不變（經 w-playwright 之守門參數生效）', async function() {
+        if (process.platform !== 'win32') {
+            this.skip() // LogonUser 之症狀限 Windows
+        }
+        assert.equal(openRes && openRes.ok, true, '真 Chrome 未成功啟動，無從驗證守門') // 守門生效之前提：確有啟動
+        const b1 = await readBadPassword()
+        assert.deepEqual([b1.ok, b1.bad], [true, bad0], `錯誤密碼次數由 ${bad0} 變為 ${b1.bad}：立即停止一切真 Chrome 之啟動並回報`)
     })
 
 })

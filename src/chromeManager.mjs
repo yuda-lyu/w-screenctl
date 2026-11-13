@@ -1,5 +1,6 @@
 import { mkdirSync } from 'fs'
-import { chromium } from 'playwright'
+import path from 'path'
+import wpw from 'w-playwright'
 
 
 /**
@@ -10,6 +11,11 @@ import { chromium } from 'playwright'
  * chromeState-tagged Error 給 errResponse 統一處理。
  *
  * lifecycle 操作（open / close / shutdown）走 _opLock 序列化，避免並發 race。
+ *
+ * 啟動一律經自有套件 w-playwright（`wpw.launchChromiumPersistent`），本套件不直接依賴 playwright／playwright-core：
+ * w-playwright 於命令列恰給一個 `--disable-features`（Playwright 預設＋守門功能 AutofillAiWalletPrivatePasses＋本套件之 Translate），
+ * 避免 Windows 上 Chrome 153 起每啟動一次即以錯誤密碼替目前使用者呼叫一次 LogonUser（10 分鐘內 10 次即鎖定帳號）。
+ * 啟動失敗之錯誤為 w-playwright 之固定詞彙（帶 code，如 E_LAUNCH、E_LAUNCH_TIMEOUT、E_ENV、E_LOGON_GUARD），不含 Playwright 原訊息。
  */
 
 const TIMEOUT_LAUNCH = 20000
@@ -155,7 +161,7 @@ class ChromeManager {
             '--test-type',
             '--hide-crash-restore-bubble',
             '--disable-notifications',
-            '--disable-features=Translate',
+            '--disable-features=Translate', // 由 w-playwright 併入其唯一之一串（不再使 Playwright 之預設停用清單失效）
             '--lang=zh-TW',
         ]
         if (disableSandbox) args.push('--no-sandbox')
@@ -171,7 +177,10 @@ class ChromeManager {
             _viewport = { width: viewport.width, height: viewport.height }
         }
 
-        mkdirSync(userDataDir, { recursive: true })
+        // 以絕對路徑交給 w-playwright（其介面要求非空之 userDataDir 為絕對路徑）：只解析相對路徑、絕對路徑原字串照交，
+        // 與 Playwright 用戶端原本之處理相同（絕對路徑不做字面正規化，含 `..` 與符號連結之語意不變），資料夾不變
+        const dir = path.isAbsolute(userDataDir) ? userDataDir : path.resolve(userDataDir)
+        mkdirSync(dir, { recursive: true })
 
         const ctxOpts = {
             channel: 'chrome',
@@ -184,7 +193,8 @@ class ChromeManager {
         if (hasViewport && Number.isFinite(deviceScaleFactor)) ctxOpts.deviceScaleFactor = deviceScaleFactor
 
         // launch 不能 cancel；race 輸了要等底層真結束才釋放 _opLock，避免 retry 撞 SingletonLock
-        const launchP = chromium.launchPersistentContext(userDataDir, ctxOpts)
+        // 經 w-playwright 啟動（唯一啟動點）：合併守門參數、檢查環境與 playwright-core 版本，登入守門開啟時先讀錯誤密碼次數
+        const launchP = wpw.launchChromiumPersistent(dir, ctxOpts)
         let context
         try {
             context = await this._withDeadline(launchP, TIMEOUT_LAUNCH, 'launchPersistentContext')

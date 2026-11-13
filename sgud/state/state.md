@@ -1,12 +1,13 @@
 # 現況(state)
 
-只記現況、不寫過程(過程見 `sgud/exp/experience.md`);藍圖見 `sgud/rule/rulebook.md`.最後更新:2026-11-12(ds-scr:相依 `@hapi/hapi` ^21.4.13 先行 Host 驗證之調適,SEC-14).`package.json` 版本 1.0.43(本輪未改版、未發布);相依 `@hapi/hapi` ^21.4.13、`joi` ^18.3.2(本輪未動 package.json).
+只記現況、不寫過程(過程見 `sgud/exp/experience.md`);藍圖見 `sgud/rule/rulebook.md`.最後更新:2026-11-13(pm-sc:改經 w-playwright 啟動 Chrome,PW-01～PW-05;排程第 442 項).`package.json` 版本 1.0.45(本輪未改版、未發布);相依 `@hapi/hapi` ^21.4.13、`joi` ^18.3.2、`w-mousekey` ^1.0.62、`w-playwright` ^1.0.1(帶入 `playwright-core` 精確 1.64.1)、`wsemi` ^1.9.59;**不再依賴 `playwright`**.
 
 ## 功能狀態
 
 | 功能 | 狀態 | 規則帳本 | 測試檔 | 已知缺口/待辦 |
 |---|---|---|---|---|
 | Chrome 生命週期(`/chrome/open`、`GET/DELETE /chrome`)、頁面操作(截圖、導頁、evaluate、頁面級滑鼠鍵盤) | 完成(本輪僅加閘門,語意未動) | — | `chromeManager`、`chromeRss`、`errClassify`、`routeFactory`、`bootRoutes`;`momo.e2e`(有頭,未納入 agent 自跑) | — |
+| Chrome 啟動經 w-playwright(唯一啟動點 `chromeManager._launch` → `wpw.launchChromiumPersistent`;命令列恰一個 `--disable-features`=Playwright 預設＋`AutofillAiWalletPrivatePasses`＋`Translate`;錯誤為 w-playwright 固定詞彙) | 完成(2026-11-13,pm-sc;含外審 terra 修正);以替身、headless shell 與副本建置之 dist 冒煙驗證接線,**真 Chrome(有頭)未驗** | PW-01～PW-05 | `unit-chromeLaunch`(16)、`api-chromeLaunch`(7,其一真啟動 headless shell);`momo.e2e`(`before` 起一次、`after` 以 `ChromeManager.shutdown` 關閉、Windows 錯誤密碼次數前後比對;未跑) | 待主控於守門監看下跑 `momo.e2e`(真 Chrome 有頭,增量須 0);`E_PW_VERSION`、`E_LOGON_GUARD`、本套件 20 秒期限三格未測;登入守門佇列與本套件期限之交錯為已知限制(帳本 PW-03);`momo.e2e` 檔名未依 `e2e-` 前綴、預設埠 8080(既有,未改) |
 | 系統級 `/screenshot`、`/mouse/*`、`/keyboard/*`(Windows: w-mousekey/AHK;Linux: xdotool+ImageMagick) | 完成;維持開啟,受 token 保護 | SEC-07 | `keyAlias`;閘門由 `api-security` 驗(以 Joi 400 判斷通過,不實際操作桌面) | 真實鍵鼠實際動作未於本輪重測(程式路徑未動) |
 | 預設只綁本機 | 完成 | SEC-01 | `unit-security`、`api-security` R01、`api-security-g` | — |
 | Bearer token(定時比較)、`/health` 免 token、未註冊路徑 | 完成 | SEC-02/03 | `unit-security`、`api-security` R02~R04 | 未註冊路徑與預檢走 Hapi 特殊路由,無 token 時回 404 而非 401(無 handler 執行,已鎖定於測試) |
@@ -24,6 +25,7 @@
 
 ## 最近一次驗證
 
+- 2026-11-13(pm-sc,改經 w-playwright;含外審修正):非瀏覽器全套 13 檔(前 11 檔＋`unit-chromeLaunch`、`api-chromeLaunch`)修前 **310 passing / 4 pending / 0 failing** → 修後 **333 passing / 4 pending / 0 failing**(+23 新案;`--no-parallel` 與 `--parallel` 皆同;pending 名單同修前,皆 POSIX 專屬);新測試對 HEAD 版 `chromeManager.mjs` 載入即紅(`playwright` 已不可解析,先確認後才跑,未啟動瀏覽器);變異 8/8 轉紅(M1 不經 wpw、M2 拿掉 channel、M3 `ignoreDefaultArgs:true`、M4 不轉絕對路徑、M5 拿掉 `Translate`、M6 非持久啟動、M7 headless 反轉、M8 絕對路徑亦正規化);副本建置之 dist:`require("playwright")` 0、`require("w-playwright")` 1,由 dist 正式入口經替身驗接線通過;R-PW-ONLY 盤點 0 處;錯誤密碼次數全程 0(只啟動 headless shell);`momo.e2e` 只以 `--dry-run` 確認可載入(4 案),**未跑**.
 - 2026-11-12(ds-scr,@hapi/hapi 21.4.13 跟跑調適):非瀏覽器全套(11 檔:`unit-security`、`unit-audit`、`api-security`、`api-audit`、`api-security-g`、`bootRoutes`、`chromeManager`、`chromeRss`、`errClassify`、`keyAlias`、`routeFactory`)修前 **296 passing / 4 pending / 2 failing**(`api-security` R06、`api-audit` A02)→ 修後 **310 passing / 4 pending / 0 failing**(+12 新案;`--no-parallel` 與 `--parallel` 皆同);受影響三檔(`unit-security`、`api-security`、`api-audit`)重跑 5 次皆 141 passing / 3 pending;新案對 HEAD 之 src 跑 11/12 轉紅(其餘 1 案為「Hapi 放行而本套件擋下」之不變行為,前後皆綠);變異 11/11 被抓到(M1 不註冊 `onPreResponse`、M2 一律放行、M3 不記 `app.denied`、M4 只判重複 Host、M5 拿掉 `info.remote`、M6 不限 400、M7 不看 Boom、M8 覆寫已拒絕者、M9 `onRequest` 只判重複 Host、M10 `hostCheck` 關閉仍檢查、M11 白名單放寬);eslint 對改動檔 0 error;`~/.w-screenctl` 不存在(AUD-08)。未跑:`momo.e2e`(有頭視窗＋外網)。
 - 2026-10-26(run02):11 個非瀏覽器測試檔(既有 6 + `unit-security` 43 + `api-security` 54 + `unit-audit` 58 + `api-audit` 34 + `api-security-g` 15)**297 passing / 4 pending**(皆 POSIX 專屬:token 檔 0600 ×2、紀錄檔 0600/0700 ×2);變異 70/70 被抓到(run01 的 29 + run02 的 41;N40 首輪存活,測試夾具強化後被抓到);L5 真 `node g.mjs` + headless Chrome + 唯讀系統級截圖 42/42;rollup 建置 + UMD smoke 通過;`npm pack --dry-run` 26 檔;外審 sol 16 條全屬實並已處理(#8、#9 部分採納).
 - 2026-10-26(run01):`unit-security`(43)+`api-security`(54)+`api-security-g`(10)+既有非瀏覽器測試(97)共 202 passing / 2 pending(POSIX 權限);變異 29/29;L5 22/22;外審 sol 16 條(15 採納修正,1 條範圍外).
@@ -33,6 +35,7 @@
 
 ## 發布前檢查(給主控)
 
-- `dist/w-screenctl.umd.js` 目前為舊碼(`grep -c SCREENCTL_TOKEN`、`grep -c audit-` 皆為 0);發布流程重建後應 ≥ 1.
-- `npm pack --dry-run` 應為 26 檔(見 `.npmignore`)且含 `src/security.mjs`、`src/auditLog.mjs`.
+- `dist/w-screenctl.umd.js` 目前為舊碼(`grep -c SCREENCTL_TOKEN`、`grep -c audit-` 皆為 0);發布流程重建後應 ≥ 1,且 `grep -cE "require\([\"']playwright(-core)?[\"']\)"` 為 0、`grep -cE "require\([\"']w-playwright[\"']\)"` ≥ 1(external;舊 dist 目前為 `require("playwright")` 1 處,雙引號).
+- `npm pack --dry-run`:`.npmignore` 已於 `ebd0010` 移除(依 npm 讀 `.gitignore`),2026-11-13 為 112 檔(含 `test/`、`docs/`、`sgud/`),須含 `src/security.mjs`、`src/auditLog.mjs`、`src/chromeManager.mjs`.
+- 真 Chrome 之 `momo.e2e`:開始前錯誤密碼次數須為 0,於守門監看下執行,結束後須仍為 0(帳本 PW-05).
 - 測試/驗證腳本不得寫真實 `~/.w-screenctl`:跑完以 `ls ~/.w-screenctl` 確認不存在(AUD-08).

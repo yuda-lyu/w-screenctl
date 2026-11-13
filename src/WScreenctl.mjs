@@ -20,10 +20,12 @@ const SYSTEM_APP = { feature: 'system' }
 /**
  * 啟動 w-screenctl 服務，對外提供 REST API 控制作業系統桌面（滑鼠、鍵盤、截圖）與 Chrome 瀏覽器
  *
- * 跨平台支援：Linux 走 xdotool / ImageMagick，Windows 走 w-mousekey / AHK；Chrome 控制全平台皆透過 Playwright
+ * 跨平台支援：Linux 走 xdotool / ImageMagick，Windows 走 w-mousekey / AHK；Chrome 控制全平台皆透過 Playwright（經自有套件 w-playwright 啟動，須安裝 Google Chrome）
  *
  * `/chrome/open` 預設以 headless 啟動；需要實體視窗（系統級滑鼠鍵盤 / 系統截圖操作 chrome 時）
- * 得於 payload 送 `opt.headless: false`
+ * 得於 payload 送 `opt.headless: false`。啟動一律經 w-playwright：命令列恰一個 `--disable-features`
+ * （Playwright 預設＋`AutofillAiWalletPrivatePasses`＋`Translate`），避免 Windows 上 Chrome 153 起每次啟動即累計一次錯誤密碼而鎖住帳號；
+ * 環境變數 `PWDEBUG`（inspector 模式）、`SELENIUM_REMOTE_URL` 不支援（需啟動 Chrome 之 `/chrome/open` 失敗）；啟動失敗之 `error` 為 w-playwright 之固定詞彙
  *
  * 零信任設計：caller 可任意 retry / 中斷 / agent swap，server 維持自洽狀態。所有 chrome lifecycle
  * 透過 ChromeManager 序列化；所有路由經由 routeFactory 統一錯誤處理；所有 payload 經 Joi 驗證。
